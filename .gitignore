@@ -1,0 +1,37 @@
+# --- 機密分離 ---
+
+# リクエスト(自分の投資方針が書いてある可能性)
+inputs/*
+!inputs/.gitkeep
+!inputs/sample_request.md
+
+# 自前で集めた決算メモ等
+knowledge/*
+!knowledge/.gitkeep
+
+# 生成物(個別レポート)
+outputs/*
+!outputs/.gitkeep
+
+# --- Claude Code ローカル個人設定 ---
+.claude/settings.local.json
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- OS / エディタ ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
+
+# --- その他 ---
+*.log
+.env
+.env.local
