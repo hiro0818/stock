@@ -1,18 +1,18 @@
 """
-app.py — Streamlit Web ダッシュボード(銘柄選びアシスタント UI)
+app.py — 銘柄選びアシスタント Streamlit ダッシュボード
 
-起動:
-  streamlit run app.py
+設計方針:
+  - 事前にデータを取得しない(ユーザー入力起点)
+  - 入力されたら、その銘柄を中心に多角的に分析(総合スコア / テクニカル / ファンダ /
+    競合 / テーマ / マクロ環境)
+  - すべて日本語表記
+  - キャッシュ TTL = 1 時間(yfinance データ遅延 1 時間以内に維持)
 
-起動後、ブラウザが自動で開いて http://localhost:8501 に接続される。
-左サイドバーでティッカーを入力 → タブで「概要」「チャート」「競合比較」「Watchlist」「日次ログ」を切り替え。
-
-⚠️ 投資助言ではありません。
+⚠️ 投資助言ではありません。判断材料の整理用です。
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -21,13 +21,16 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-# tools/ を import path に追加
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
 
-from fetch_stock import get_summary, get_history, get_technical  # noqa: E402
+from fetch_stock import get_history, get_summary, get_technical  # noqa: E402
 from find_competitors import find_peers  # noqa: E402
+from macro_context import relevant_macros_for  # noqa: E402
+from scoring import find_themes_for_ticker, total_score  # noqa: E402
+from themes import THEMES  # noqa: E402
 
+# ───────── ページ設定 ─────────
 st.set_page_config(
     page_title="銘柄選びアシスタント",
     page_icon="📈",
@@ -35,161 +38,298 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ───────── サイドバー ─────────
-st.sidebar.title("📈 銘柄選び")
-st.sidebar.caption("yfinance ベース・自分用ツール")
-
-ticker_input = st.sidebar.text_input(
-    "ティッカー",
-    value="AAPL",
-    help="米国株: AAPL / MSFT / NVDA … 日本株: 7203.T / 6758.T / 9984.T …",
-)
-ticker = ticker_input.strip().upper()
-
-period = st.sidebar.selectbox(
-    "チャート期間",
-    options=["3mo", "6mo", "1y", "2y", "5y", "max"],
-    index=2,
-)
-
-run_button = st.sidebar.button("📊 分析する", type="primary", use_container_width=True)
-
-st.sidebar.divider()
-st.sidebar.markdown(
-    "##### ⚠️ 免責\n"
-    "本ツールは投資助言ではありません。判断材料の整理のみを行い、"
-    "最終的な投資判断と責任はユーザー自身にあります。"
-    "yfinance のデータには通常 15 分以上の遅延があります。"
-)
+CACHE_TTL = 3600  # 1 時間
 
 
-# ───────── ヘルパー ─────────
-@st.cache_data(ttl=300)
-def cached_summary(t: str) -> dict:
+# ───────── キャッシュ付き取得関数 ─────────
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _summary(t: str) -> dict:
     return get_summary(t)
 
 
-@st.cache_data(ttl=300)
-def cached_technical(t: str) -> dict:
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _technical(t: str) -> dict:
     return get_technical(t)
 
 
-@st.cache_data(ttl=600)
-def cached_history(t: str, period: str) -> list:
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _history(t: str, period: str) -> list:
     return get_history(t, period)
 
 
-@st.cache_data(ttl=600)
-def cached_peers(t: str, limit: int = 5) -> dict:
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _peers(t: str, limit: int = 5) -> dict:
     return find_peers(t, limit)
 
 
+# ───────── ヘルパー ─────────
 def fmt_num(v, digits: int = 2) -> str:
-    if v is None:
+    if v is None or (isinstance(v, float) and v != v):
         return "—"
     if isinstance(v, (int, float)):
-        if abs(v) >= 1_000_000_000_000:
-            return f"{v / 1e12:.{digits}f}T"
-        if abs(v) >= 1_000_000_000:
-            return f"{v / 1e9:.{digits}f}B"
-        if abs(v) >= 1_000_000:
-            return f"{v / 1e6:.{digits}f}M"
+        if abs(v) >= 1e12:
+            return f"{v / 1e12:.{digits}f} 兆"
+        if abs(v) >= 1e8:
+            return f"{v / 1e8:.{digits}f} 億"
+        if abs(v) >= 1e4:
+            return f"{v / 1e4:.{digits}f} 万"
         return f"{v:,.{digits}f}"
     return str(v)
 
 
-def fmt_pct(v) -> str:
+def fmt_pct(v, mult_100: bool = False) -> str:
     if v is None:
         return "—"
-    return f"{v * 100:.2f}%" if abs(v) < 5 else f"{v:.2f}%"
+    if mult_100:
+        return f"{v:.2f}%"
+    return f"{v * 100:.2f}%"
 
 
-# ───────── メイン ─────────
-if not ticker:
-    st.info("左サイドバーでティッカーを入力して「分析する」を押してください。")
+# ───────── サイドバー ─────────
+st.sidebar.title("📈 銘柄選び")
+st.sidebar.caption("yfinance ベース・自分用ツール")
+
+st.sidebar.markdown("##### 銘柄ティッカーを入力")
+ticker_input = st.sidebar.text_input(
+    "例:AAPL / NVDA / 7203.T / 6758.T",
+    value="",
+    placeholder="ティッカーを入れてね",
+    key="ticker_input",
+)
+period = st.sidebar.selectbox(
+    "チャート期間",
+    options=["3mo", "6mo", "1y", "2y", "5y"],
+    index=2,
+    format_func=lambda x: {
+        "3mo": "3 か月",
+        "6mo": "6 か月",
+        "1y": "1 年",
+        "2y": "2 年",
+        "5y": "5 年",
+    }[x],
+)
+
+run = st.sidebar.button("🔍 分析開始", type="primary", use_container_width=True)
+
+# クイック入力ボタン
+st.sidebar.markdown("##### よく見る銘柄")
+quick_cols = st.sidebar.columns(3)
+for i, (label, t) in enumerate(
+    [("AAPL", "AAPL"), ("NVDA", "NVDA"), ("MSFT", "MSFT"),
+     ("7203", "7203.T"), ("6758", "6758.T"), ("9984", "9984.T")]
+):
+    if quick_cols[i % 3].button(label, key=f"quick_{t}", use_container_width=True):
+        st.session_state["ticker_input"] = t
+        st.session_state["_run"] = True
+        st.rerun()
+
+# 履歴
+if "history_tickers" not in st.session_state:
+    st.session_state["history_tickers"] = []
+
+if st.session_state["history_tickers"]:
+    st.sidebar.markdown("##### 過去に調べた銘柄")
+    for prev in st.session_state["history_tickers"][-10:][::-1]:
+        if st.sidebar.button(f"↺ {prev}", key=f"hist_{prev}", use_container_width=True):
+            st.session_state["ticker_input"] = prev
+            st.session_state["_run"] = True
+            st.rerun()
+
+st.sidebar.divider()
+st.sidebar.markdown(
+    "##### ⚠️ 免責\n"
+    "このツールは投資助言ではありません。判断材料の整理のみを行い、"
+    "最終的な投資判断と責任はユーザー自身にあります。\n\n"
+    "yfinance データは取得時点で最大 1 時間遅延の可能性があります。"
+)
+
+# クイックボタンからのトリガを拾う
+if st.session_state.get("_run"):
+    run = True
+    st.session_state["_run"] = False
+
+ticker = (st.session_state.get("ticker_input") or ticker_input).strip().upper()
+
+
+# ───────── ホーム画面(銘柄未入力)─────────
+if not ticker or not run:
+    st.title("📈 銘柄選びアシスタント")
+    st.caption("yfinance ベース・自分用ツール  ·  ⚠️ 投資助言ではありません")
+
+    st.markdown(
+        """
+        ### 使い方
+        左サイドバーに **ティッカー** を入力して **「分析開始」** を押してください。
+        その銘柄を起点に、以下を **多角的にレポート** します:
+
+        | 観点 | 内容 |
+        |---|---|
+        | 🎯 総合評価 | 5 観点(バリュエーション / 収益性 / 成長性 / 財務 / テクニカル)を 0-100 でスコア化 → 強気・中立・弱気の判定 |
+        | 💰 ファンダメンタル | 主要な財務指標と、その水準の解釈コメント |
+        | 📈 テクニカル | ローソク足 + MA20/50/200 + RSI(14)+ MACD + 出来高、シグナル自動検出 |
+        | 🏢 競合比較 | 同業他社を自動列挙して横並び比較 |
+        | 🌐 関連テーマ | この銘柄が属するメタトレンド(AI / 半導体 / EV など)と、その他の銘柄 |
+        | 🌍 マクロ環境 | この銘柄に関係する指標(米金利 / VIX / ドル円 / 業界 ETF)を厳選表示 |
+
+        ### ティッカーの書き方
+        - **米国株**: `AAPL`, `MSFT`, `NVDA`, `GOOGL`, `META`
+        - **日本株**: `7203.T`(トヨタ), `6758.T`(ソニー G), `9984.T`(SBG)、証券コード末尾に `.T`
+
+        ### よく見る銘柄
+        サイドバーのクイックボタンから 1 クリックで分析できます。
+        """
+    )
     st.stop()
 
-st.title(f"📈 {ticker}")
 
-# データ取得
-with st.spinner(f"{ticker} のデータを yfinance から取得中..."):
+# ───────── データ取得(指定銘柄)─────────
+if ticker not in st.session_state["history_tickers"]:
+    st.session_state["history_tickers"].append(ticker)
+
+with st.spinner(f"{ticker} のデータを取得中..."):
     try:
-        summary = cached_summary(ticker)
-        technical = cached_technical(ticker)
+        summary = _summary(ticker)
+        technical = _technical(ticker)
     except Exception as e:
-        st.error(f"データ取得に失敗: {e}")
+        st.error(f"yfinance からの取得に失敗しました: {e}")
         st.stop()
 
 if summary.get("name") is None:
-    st.warning(
-        "ティッカーが見つかりません。yfinance に登録がない可能性があります。"
-        "日本株は `XXXX.T` 形式で入力してください(例: 7203.T)。"
+    st.error(
+        f"ティッカー `{ticker}` が見つかりません。日本株は `XXXX.T` 形式で入力してください(例: 7203.T)。"
     )
     st.stop()
 
-st.subheader(f"{summary.get('name')}  ·  {summary.get('sector')} / {summary.get('industry')}")
-st.caption(f"取得日時: {summary.get('fetched_at')}  ·  yfinance(15 分以上の遅延あり)")
+# ───────── ヒーロー(銘柄ヘッダー)─────────
+st.title(f"📈 {summary.get('name')}  ·  `{ticker}`")
+col_meta1, col_meta2, col_meta3 = st.columns([2, 2, 3])
+col_meta1.markdown(f"**セクター**: {summary.get('sector') or '—'}")
+col_meta2.markdown(f"**業界**: {summary.get('industry') or '—'}")
+col_meta3.caption(f"取得日時: {summary.get('fetched_at', '')[:19]}  ·  yfinance(遅延あり)")
 
-# ── タブ ──
-tab_overview, tab_chart, tab_competitors, tab_watchlist, tab_daily = st.tabs(
-    ["概要", "チャート", "競合比較", "Watchlist", "日次ログ"]
+# 総合スコア
+score = total_score(summary, technical)
+
+st.divider()
+hero_col1, hero_col2 = st.columns([1, 2])
+with hero_col1:
+    # 大きな判定バッジ
+    st.metric("総合判定", score["判定"], help="5 観点の平均スコアから自動判定")
+    st.metric("総合スコア", f"{score['総合スコア']} / 100")
+
+with hero_col2:
+    # 観点別スコアを横棒で
+    axes = score["観点別"]
+    df_axes = pd.DataFrame(
+        [{"観点": k, "スコア": v["score"]} for k, v in axes.items()]
+    )
+    bar = go.Figure(
+        go.Bar(
+            x=df_axes["スコア"],
+            y=df_axes["観点"],
+            orientation="h",
+            marker_color=df_axes["スコア"].apply(
+                lambda s: "#26a69a" if s >= 65 else ("#ffb74d" if s >= 45 else "#ef5350")
+            ),
+            text=df_axes["スコア"],
+            textposition="outside",
+        )
+    )
+    bar.update_layout(
+        height=240,
+        margin=dict(l=10, r=30, t=10, b=10),
+        xaxis=dict(range=[0, 100], title=""),
+        yaxis=dict(title=""),
+        template="plotly_white",
+    )
+    st.plotly_chart(bar, use_container_width=True)
+
+# 強み / 弱み
+strength_col, weakness_col = st.columns(2)
+with strength_col:
+    st.markdown("##### ✅ 強みの論点")
+    if score["強み"]:
+        for s in score["強み"]:
+            st.markdown(f"- {s}")
+    else:
+        st.caption("際立った強みは検出されませんでした。")
+with weakness_col:
+    st.markdown("##### ⚠️ 警戒の論点")
+    if score["弱み"]:
+        for w in score["弱み"]:
+            st.markdown(f"- {w}")
+    else:
+        st.caption("際立った弱みは検出されませんでした。")
+
+st.caption(score["免責"])
+st.divider()
+
+
+# ───────── タブ構成 ─────────
+tab_fund, tab_tech, tab_peer, tab_theme, tab_macro, tab_raw = st.tabs(
+    [
+        "💰 ファンダメンタル",
+        "📈 テクニカル",
+        "🏢 競合比較",
+        "🌐 関連テーマ",
+        "🌍 マクロ環境",
+        "🔍 生データ",
+    ]
 )
 
-# ───── 概要タブ ─────
-with tab_overview:
-    col1, col2, col3, col4 = st.columns(4)
 
-    price = summary.get("current_price")
-    week_high = summary.get("fifty_two_week_high")
-    week_low = summary.get("fifty_two_week_low")
-    range_pos = technical.get("range_position")
+# ───── ファンダメンタル ─────
+with tab_fund:
+    st.markdown("##### 主要指標")
+    f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+    f_col1.metric("株価", fmt_num(summary.get("current_price"), 2))
+    f_col2.metric("時価総額", fmt_num(summary.get("market_cap"), 2))
+    f_col3.metric("Trailing PER", fmt_num(summary.get("trailing_pe"), 1))
+    f_col4.metric("Forward PER", fmt_num(summary.get("forward_pe"), 1))
 
-    col1.metric(
-        "株価",
-        fmt_num(price),
-        delta=f"{technical.get('range_position_label', '')}"
-        if technical.get("range_position_label")
-        else None,
+    f_col5, f_col6, f_col7, f_col8 = st.columns(4)
+    f_col5.metric("PBR", fmt_num(summary.get("price_to_book"), 2))
+    f_col6.metric("ROE", fmt_pct(summary.get("return_on_equity")))
+    f_col7.metric("営業利益率", fmt_pct(summary.get("operating_margins")))
+    f_col8.metric(
+        "配当利回り",
+        fmt_pct(summary.get("dividend_yield"), mult_100=True) if summary.get("dividend_yield") else "—",
     )
-    col2.metric("時価総額", fmt_num(summary.get("market_cap")))
-    col3.metric("Trailing PER", fmt_num(summary.get("trailing_pe"), 1))
-    col4.metric("Forward PER", fmt_num(summary.get("forward_pe"), 1))
 
-    col5, col6, col7, col8 = st.columns(4)
-    col5.metric("ROE", fmt_pct(summary.get("return_on_equity")))
-    col6.metric("営業利益率", fmt_pct(summary.get("operating_margins")))
-    col7.metric("売上成長率", fmt_pct(summary.get("revenue_growth")))
-    col8.metric("配当利回り", fmt_pct((summary.get("dividend_yield") or 0) / 100) if summary.get("dividend_yield") else "—")
+    f_col9, f_col10, f_col11, f_col12 = st.columns(4)
+    f_col9.metric("売上成長率", fmt_pct(summary.get("revenue_growth")))
+    f_col10.metric("EPS成長率", fmt_pct(summary.get("earnings_growth")))
+    f_col11.metric("D/E 比率", fmt_num(summary.get("debt_to_equity"), 1))
+    f_col12.metric("流動比率", fmt_num(summary.get("current_ratio"), 2))
 
     st.divider()
 
-    # シグナル(警告ボックス)
-    if technical.get("signals"):
-        st.warning("**シグナル**: " + "  /  ".join(technical["signals"]))
-    else:
-        st.info("**シグナル**: 特記事項なし")
-
-    # トレンド
-    st.markdown(f"**トレンド判定**:{technical.get('trend')}  ·  **MACD**: {technical.get('macd_status')}")
-
-    with st.expander("🔍 全指標(yfinance 生データ)"):
-        st.json(summary)
-    with st.expander("🔍 技術指標(算出値)"):
-        st.json(technical)
+    # 観点別の解釈コメント
+    st.markdown("##### 観点別の解釈")
+    for axis, info in score["観点別"].items():
+        if axis == "テクニカル":
+            continue  # ファンダ画面ではスキップ(別タブ)
+        score_val = info["score"]
+        color = "#26a69a" if score_val >= 65 else ("#ffb74d" if score_val >= 45 else "#ef5350")
+        st.markdown(
+            f"<div style='border-left:4px solid {color}; padding:8px 12px; margin:4px 0; background:#fafafa;'>"
+            f"<b>{axis}</b>(スコア {score_val}/100): {info['note']}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
     st.divider()
     if summary.get("long_business_summary"):
-        st.markdown("##### 事業概要(yfinance)")
-        st.write(summary["long_business_summary"])
+        with st.expander("📄 事業概要(yfinance、英語)"):
+            st.write(summary["long_business_summary"])
 
 
-# ───── チャートタブ ─────
-with tab_chart:
+# ───── テクニカル ─────
+with tab_tech:
     with st.spinner("株価履歴を取得中..."):
-        history = cached_history(ticker, period)
-
+        history = _history(ticker, period)
     if not history:
-        st.warning("株価履歴データがありません")
+        st.warning("株価履歴が取得できませんでした")
     else:
         df = pd.DataFrame(history)
         df["date"] = pd.to_datetime(df["date"])
@@ -197,31 +337,26 @@ with tab_chart:
         df["ma50"] = df["close"].rolling(50).mean()
         df["ma200"] = df["close"].rolling(200).mean()
 
-        # RSI
         delta = df["close"].diff()
         gain = delta.where(delta > 0, 0.0).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-        rs = gain / loss.replace(0, float("nan"))
-        df["rsi"] = 100 - (100 / (1 + rs))
+        df["rsi"] = 100 - (100 / (1 + gain / loss.replace(0, float("nan"))))
 
-        # MACD
         ema12 = df["close"].ewm(span=12, adjust=False).mean()
         ema26 = df["close"].ewm(span=26, adjust=False).mean()
         df["macd"] = ema12 - ema26
-        df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-        df["macd_hist"] = df["macd"] - df["macd_signal"]
+        df["signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+        df["macd_hist"] = df["macd"] - df["signal"]
 
-        # 3 段構成のチャート
+        # チャート(3 段)
         fig = make_subplots(
             rows=3,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.04,
             row_heights=[0.55, 0.2, 0.25],
-            subplot_titles=("株価 + 移動平均", "RSI(14)", "MACD"),
+            subplot_titles=("ローソク足 + 移動平均", "RSI(14)", "MACD"),
         )
-
-        # ローソク足
         fig.add_trace(
             go.Candlestick(
                 x=df["date"],
@@ -236,25 +371,16 @@ with tab_chart:
             row=1,
             col=1,
         )
-        # 移動平均
         for col, color, name in [
-            ("ma20", "#ffa726", "MA20"),
-            ("ma50", "#42a5f5", "MA50"),
-            ("ma200", "#ab47bc", "MA200"),
+            ("ma20", "#ffa726", "MA 20"),
+            ("ma50", "#42a5f5", "MA 50"),
+            ("ma200", "#ab47bc", "MA 200"),
         ]:
             fig.add_trace(
-                go.Scatter(
-                    x=df["date"],
-                    y=df[col],
-                    mode="lines",
-                    name=name,
-                    line=dict(color=color, width=1.5),
-                ),
+                go.Scatter(x=df["date"], y=df[col], mode="lines", name=name, line=dict(color=color, width=1.5)),
                 row=1,
                 col=1,
             )
-
-        # RSI
         fig.add_trace(
             go.Scatter(x=df["date"], y=df["rsi"], mode="lines", name="RSI", line=dict(color="#7e57c2")),
             row=2,
@@ -262,15 +388,13 @@ with tab_chart:
         )
         fig.add_hline(y=70, line=dict(color="red", dash="dash"), row=2, col=1)
         fig.add_hline(y=30, line=dict(color="green", dash="dash"), row=2, col=1)
-
-        # MACD
         fig.add_trace(
             go.Scatter(x=df["date"], y=df["macd"], mode="lines", name="MACD", line=dict(color="#26a69a")),
             row=3,
             col=1,
         )
         fig.add_trace(
-            go.Scatter(x=df["date"], y=df["macd_signal"], mode="lines", name="Signal", line=dict(color="#ef5350")),
+            go.Scatter(x=df["date"], y=df["signal"], mode="lines", name="シグナル", line=dict(color="#ef5350")),
             row=3,
             col=1,
         )
@@ -278,14 +402,13 @@ with tab_chart:
             go.Bar(
                 x=df["date"],
                 y=df["macd_hist"],
-                name="Hist",
+                name="ヒストグラム",
                 marker_color=df["macd_hist"].apply(lambda v: "#26a69a" if v > 0 else "#ef5350"),
                 opacity=0.5,
             ),
             row=3,
             col=1,
         )
-
         fig.update_layout(
             height=750,
             showlegend=True,
@@ -296,40 +419,50 @@ with tab_chart:
         fig.update_yaxes(title_text="価格", row=1, col=1)
         fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
         fig.update_yaxes(title_text="MACD", row=3, col=1)
-
         st.plotly_chart(fig, use_container_width=True)
 
-        # 出来高(独立)
-        st.subheader("出来高")
-        vol_fig = go.Figure()
-        vol_fig.add_trace(
-            go.Bar(
-                x=df["date"],
-                y=df["volume"],
-                marker_color="#90a4ae",
-                name="出来高",
-            )
+        # 解釈コメント
+        st.markdown("##### テクニカルの解釈")
+        tech_score = score["観点別"]["テクニカル"]
+        color = "#26a69a" if tech_score["score"] >= 65 else ("#ffb74d" if tech_score["score"] >= 45 else "#ef5350")
+        st.markdown(
+            f"<div style='border-left:4px solid {color}; padding:8px 12px; margin:4px 0; background:#fafafa;'>"
+            f"<b>テクニカル スコア {tech_score['score']}/100</b>: {tech_score['note']}"
+            f"</div>",
+            unsafe_allow_html=True,
         )
-        vol_fig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=10), template="plotly_white")
-        st.plotly_chart(vol_fig, use_container_width=True)
+
+        # シグナル
+        if technical.get("signals"):
+            for sig in technical["signals"]:
+                st.warning(f"📢 {sig}")
+
+        # 主要数値
+        st.markdown("##### 直近の値")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("終値", fmt_num(technical.get("last_close"), 2))
+        c2.metric("RSI(14)", fmt_num(technical.get("rsi14"), 1))
+        c3.metric("52週レンジ位置", technical.get("range_position_label") or "—")
+        c4.metric("MACD", technical.get("macd_status") or "—")
 
 
-# ───── 競合比較タブ ─────
-with tab_competitors:
-    with st.spinner("競合銘柄を取得中..."):
-        peers_data = cached_peers(ticker, 5)
-
+# ───── 競合比較 ─────
+with tab_peer:
+    with st.spinner("同業他社を取得中..."):
+        peers_data = _peers(ticker, 5)
     competitors = peers_data.get("competitors", [])
     if not competitors:
-        st.info(f"industry='{peers_data.get('industry')}' は業界マップ未登録です。`tools/find_competitors.py` の INDUSTRY_PEERS に追加してください。")
+        st.info(
+            f"業界 `{peers_data.get('industry')}` は内蔵マップ未登録のため、競合自動列挙はスキップしました。"
+            f" `tools/find_competitors.py` の `INDUSTRY_PEERS` に追加できます。"
+        )
     else:
-        st.write(f"**業界**: {peers_data.get('industry')}  ·  **同業他社**: {len(competitors)} 社")
-
+        st.markdown(f"**業界**:{peers_data.get('industry')}  ·  **同業他社**:{len(competitors)} 社")
         rows = []
         with st.spinner(f"{len(competitors) + 1} 銘柄の指標を取得中..."):
             for t in [ticker] + competitors:
                 try:
-                    s = cached_summary(t)
+                    s = _summary(t)
                     rows.append(
                         {
                             "ティッカー": t,
@@ -337,9 +470,9 @@ with tab_competitors:
                             "株価": s.get("current_price"),
                             "時価総額": s.get("market_cap"),
                             "PER": s.get("trailing_pe"),
-                            "ROE": s.get("return_on_equity"),
-                            "営業利益率": s.get("operating_margins"),
-                            "売上成長率": s.get("revenue_growth"),
+                            "ROE(%)": (s.get("return_on_equity") or 0) * 100 if s.get("return_on_equity") else None,
+                            "営業利益率(%)": (s.get("operating_margins") or 0) * 100 if s.get("operating_margins") else None,
+                            "売上成長率(%)": (s.get("revenue_growth") or 0) * 100 if s.get("revenue_growth") else None,
                             "配当利回り(%)": s.get("dividend_yield"),
                         }
                     )
@@ -347,6 +480,7 @@ with tab_competitors:
                     rows.append({"ティッカー": t, "名称": f"取得失敗: {e}"})
 
         df_peers = pd.DataFrame(rows)
+        # 自社行をハイライトするためインデックス取得
         st.dataframe(
             df_peers,
             use_container_width=True,
@@ -355,78 +489,115 @@ with tab_competitors:
                 "株価": st.column_config.NumberColumn(format="%.2f"),
                 "時価総額": st.column_config.NumberColumn(format="%.2e"),
                 "PER": st.column_config.NumberColumn(format="%.1f"),
-                "ROE": st.column_config.NumberColumn(format="%.2f"),
-                "営業利益率": st.column_config.NumberColumn(format="%.2f"),
-                "売上成長率": st.column_config.NumberColumn(format="%.2f"),
+                "ROE(%)": st.column_config.NumberColumn(format="%.1f"),
+                "営業利益率(%)": st.column_config.NumberColumn(format="%.1f"),
+                "売上成長率(%)": st.column_config.NumberColumn(format="%.1f"),
+                "配当利回り(%)": st.column_config.NumberColumn(format="%.2f"),
             },
         )
+        st.caption(f"先頭行が分析対象銘柄(`{ticker}`)、続く行が自動列挙された同業他社です。")
 
 
-# ───── Watchlist タブ ─────
-with tab_watchlist:
-    watchlist_path = ROOT / "inputs" / "watchlist.md"
-    st.write(f"📋 `{watchlist_path.relative_to(ROOT)}`")
-
-    if not watchlist_path.exists():
-        st.warning("watchlist.md が存在しません。")
+# ───── 関連テーマ ─────
+with tab_theme:
+    themes_in = find_themes_for_ticker(ticker, THEMES)
+    if not themes_in:
+        st.info(f"`{ticker}` は内蔵テーマバスケットに含まれていません。`tools/themes.py` の `THEMES` に追加できます。")
     else:
-        content = watchlist_path.read_text(encoding="utf-8")
-        new_content = st.text_area(
-            "Watchlist の編集",
-            value=content,
-            height=300,
-            help="1行1ティッカー。`#` で始まる行はコメント。",
-        )
-        col_a, col_b = st.columns([1, 4])
-        if col_a.button("💾 保存"):
-            watchlist_path.write_text(new_content, encoding="utf-8")
-            st.success("保存しました。次回の daily_check から反映されます。")
-
+        st.markdown(f"**`{ticker}` が属するテーマ**:{', '.join(themes_in)}")
         st.divider()
-        st.caption("daily_check.py を実行すると、ここに登録された全銘柄を一括取得できます。")
-        if st.button("▶️ 今すぐ daily_check を実行"):
-            import subprocess
 
-            with st.spinner("daily_check 実行中..."):
-                result = subprocess.run(
-                    [sys.executable, str(ROOT / "tools" / "daily_check.py")],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    timeout=300,
-                )
-                if result.returncode == 0:
-                    st.success("実行完了")
-                    st.code(result.stdout)
-                else:
-                    st.error(result.stderr or result.stdout)
+        for theme_name in themes_in:
+            theme_info = THEMES[theme_name]
+            st.markdown(f"### 🏷️ {theme_name}")
+            st.caption(theme_info["description"])
 
-
-# ───── 日次ログタブ ─────
-with tab_daily:
-    daily_dir = ROOT / "outputs" / "daily"
-    if not daily_dir.exists():
-        st.info("まだ日次ログがありません。Watchlist タブから daily_check を実行するか、コマンドで `python tools/daily_check.py` を回してください。")
-    else:
-        date_dirs = sorted([d for d in daily_dir.iterdir() if d.is_dir()], reverse=True)
-        if not date_dirs:
-            st.info("日次ログのディレクトリがありません。")
-        else:
-            selected = st.selectbox("日付を選択", [d.name for d in date_dirs])
-            sel_dir = daily_dir / selected
-            index_file = sel_dir / "_index.md"
-            if index_file.exists():
-                st.markdown(index_file.read_text(encoding="utf-8"))
-            else:
-                st.warning("_index.md が見つかりません。")
-
-            st.divider()
-            st.caption("各銘柄の生 JSON")
-            json_files = sorted(sel_dir.glob("*.json"))
-            for jf in json_files:
-                with st.expander(jf.name):
+            # 同テーマ銘柄の主要指標を取得して比較表に
+            with st.spinner(f"{theme_name} の銘柄を取得中..."):
+                theme_rows = []
+                for t in theme_info["tickers"][:8]:  # 最大 8 銘柄まで(速度配慮)
                     try:
-                        data = json.loads(jf.read_text(encoding="utf-8"))
-                        st.json(data)
-                    except Exception as e:
-                        st.error(f"読み込みエラー: {e}")
+                        s = _summary(t)
+                        theme_rows.append(
+                            {
+                                "ティッカー": t,
+                                "名称": (s.get("name") or "—")[:30],
+                                "株価": s.get("current_price"),
+                                "時価総額": s.get("market_cap"),
+                                "PER": s.get("trailing_pe"),
+                                "売上成長率(%)": (s.get("revenue_growth") or 0) * 100
+                                if s.get("revenue_growth")
+                                else None,
+                                "リーダー": "★" if t in theme_info.get("leaders", []) else "",
+                            }
+                        )
+                    except Exception:
+                        pass
+            if theme_rows:
+                df_th = pd.DataFrame(theme_rows)
+                st.dataframe(
+                    df_th,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "株価": st.column_config.NumberColumn(format="%.2f"),
+                        "時価総額": st.column_config.NumberColumn(format="%.2e"),
+                        "PER": st.column_config.NumberColumn(format="%.1f"),
+                        "売上成長率(%)": st.column_config.NumberColumn(format="%.1f"),
+                    },
+                )
+            st.divider()
+
+
+# ───── マクロ環境 ─────
+with tab_macro:
+    st.markdown("##### この銘柄に関係が深いマクロ指標")
+    st.caption("銘柄のセクター・所属テーマ・PER 水準から、影響度の高いものを自動選別します。")
+
+    themes_in = find_themes_for_ticker(ticker, THEMES)
+    macros = relevant_macros_for(ticker, summary, themes_in)
+
+    rows = []
+    with st.spinner("関連マクロ指標を取得中..."):
+        for m in macros:
+            try:
+                s = _summary(m["ticker"])
+                t = _technical(m["ticker"])
+                rows.append(
+                    {
+                        "指標": m["label"],
+                        "現在値": s.get("current_price") or t.get("last_close"),
+                        "トレンド": t.get("trend") or "—",
+                        "RSI(14)": t.get("rsi14"),
+                        "なぜ関係するか": m["reason"],
+                    }
+                )
+            except Exception:
+                rows.append({"指標": m["label"], "現在値": "取得失敗", "なぜ関係するか": m["reason"]})
+
+    if rows:
+        df_macro = pd.DataFrame(rows)
+        st.dataframe(
+            df_macro,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "現在値": st.column_config.NumberColumn(format="%.2f"),
+                "RSI(14)": st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
+    st.info(
+        f"💡 上記は `{ticker}` に強く関連するものを厳選しています。すべてのマクロ指標を見るには、"
+        "`tools/themes.py` の `INDICES` を直接参照してください。"
+    )
+
+
+# ───── 生データ ─────
+with tab_raw:
+    st.markdown("##### yfinance の生レスポンス(デバッグ・裏取り用)")
+    with st.expander("📦 サマリ"):
+        st.json(summary)
+    with st.expander("📈 テクニカル"):
+        st.json(technical)
+    with st.expander("🎯 スコア計算"):
+        st.json(score)
