@@ -22,6 +22,9 @@ __pycache__/
 .venv/
 venv/
 
+# --- Streamlit cache ---
+.streamlit/secrets.toml
+
 # --- OS / エディタ ---
 .DS_Store
 Thumbs.db

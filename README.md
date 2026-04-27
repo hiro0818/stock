@@ -35,7 +35,18 @@ cd "<このフォルダ>"
 claude
 ```
 
-### 5. 動作確認(2 通り)
+### 5. (推奨)Web ダッシュボード
+
+ブラウザで使える GUI です。Claude Code を立ち上げなくても、銘柄入力 → ローソク足/移動平均/RSI/MACD のチャート + 競合比較 + watchlist 管理が可能。
+
+```powershell
+pip install streamlit plotly
+streamlit run app.py
+```
+
+自動でブラウザが立ち上がり `http://localhost:8501` を開きます。閉じるときは PowerShell で Ctrl+C。
+
+### 6. 動作確認(2 通り)
 
 #### 5a. 単一銘柄の即時評価
 ```
@@ -55,12 +66,13 @@ claude
 
 ### 用途別の使い分け
 
-| やりたいこと | 使うコマンド |
+| やりたいこと | 使うインタフェース |
 |---|---|
-| 「この株どう?」と聞く感覚で即評価 | `/quick-eval AAPL` |
-| 翌日もう一回最新を見たい | 同じコマンド `/quick-eval AAPL` を翌日叩く |
+| **GUI でグラフ見ながら触りたい** | **`streamlit run app.py`(Web ダッシュボード)** |
+| 「この株どう?」と聞く感覚で即評価 | Claude Code で `/quick-eval AAPL` |
+| 翌日もう一回最新を見たい | 同じコマンド `/quick-eval AAPL` を翌日叩く / ダッシュボードを再表示 |
 | 複数銘柄を毎日自動で追跡したい | `inputs/watchlist.md` に登録 → daily_check.py(後述) |
-| 投資方針から推奨ポートフォリオを設計 | `/select-stocks` |
+| 投資方針から推奨ポートフォリオを設計 | Claude Code で `/select-stocks` |
 
 ---
 
@@ -131,6 +143,7 @@ knowledge/
 .
 ├── CLAUDE.md                       プロジェクトルール
 ├── README.md                       このファイル
+├── app.py                          Streamlit Web ダッシュボード(streamlit run app.py)
 ├── .gitignore                      機密分離
 ├── .claude/
 │   ├── agents/                     5 体のサブエージェント
