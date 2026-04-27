@@ -21,6 +21,18 @@ import math
 import statistics
 from typing import Iterable
 
+# ───────── ウォークフォワード検証から導出した重み(PDCA の Act)─────────
+# 5 銘柄 × 50 サンプルの walk-forward 検証(2026-04-28 実施)で
+# 各モデルの平均絶対誤差から導出した重み付き平均用の係数。
+# 詳細: outputs/pdca_5stocks_report.md
+WALK_FORWARD_WEIGHTS: dict[str, float] = {
+    "technical": 0.35,        # 平均誤差 7.21%(最小)
+    "mean_reversion": 0.25,   # 平均誤差 7.73%
+    "monte_carlo": 0.25,      # 平均誤差 8.14%(方向当たり率は最高 54.4%)
+    "linear": 0.15,           # 平均誤差 10.39%(最大、トレンド時に過大予測しがち)
+    # アナリスト目標は時点が固定で walk-forward と整合しないため重みなし(参考値扱い)
+}
+
 
 # ───────── 個別モデル ─────────
 
@@ -200,7 +212,7 @@ def predict_all(
         "p75": mc["p75"] if mc else None,
     }
 
-    # アンサンブル: 全予測の中央値
+    # アンサンブル(中央値): 外れ値耐性
     valid_preds = [m["predicted"] for m in out["models"].values() if m["predicted"] is not None]
     if valid_preds:
         out["ensemble"] = statistics.median(valid_preds)
@@ -209,8 +221,24 @@ def predict_all(
             "high": max(valid_preds),
         }
 
+    # 重み付きアンサンブル(walk-forward 精度ベースの Act 反映版)
+    weighted_sum = 0.0
+    weight_total = 0.0
+    contributions = {}
+    for model_name, w in WALK_FORWARD_WEIGHTS.items():
+        m = out["models"].get(model_name)
+        if m and m.get("predicted") is not None:
+            weighted_sum += m["predicted"] * w
+            weight_total += w
+            contributions[model_name] = w
+    if weight_total > 0:
+        out["weighted_ensemble"] = weighted_sum / weight_total
+        out["weighted_ensemble_weights"] = contributions
+
     # 上昇率
     if out["ensemble"] and current:
         out["ensemble_change_pct"] = (out["ensemble"] - current) / current * 100
+    if out.get("weighted_ensemble") and current:
+        out["weighted_ensemble_change_pct"] = (out["weighted_ensemble"] - current) / current * 100
 
     return out

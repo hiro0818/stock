@@ -37,7 +37,8 @@ from extra_sources import (  # noqa: E402
 from fetch_stock import get_history, get_summary, get_technical  # noqa: E402
 from find_competitors import find_peers  # noqa: E402
 from macro_context import relevant_macros_for  # noqa: E402
-from predict import predict_all  # noqa: E402
+from predict import WALK_FORWARD_WEIGHTS, predict_all  # noqa: E402
+from walk_forward import latest_walk_forward, run_walk_forward, save_walk_forward  # noqa: E402
 from prediction_log import (  # noqa: E402
     aggregate_accuracy,
     list_all_predictions,
@@ -645,15 +646,26 @@ with tab_predict:
         ens = prediction["ensemble"]
         change_pct = prediction.get("ensemble_change_pct") or 0
         band = prediction.get("ensemble_band") or {}
+        weighted = prediction.get("weighted_ensemble")
+        weighted_change = prediction.get("weighted_ensemble_change_pct")
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("現在値", fmt_num(cur, 2))
         c2.metric(
-            "アンサンブル予測(30 営業日後)",
+            "アンサンブル(中央値)",
             fmt_num(ens, 2),
             delta=f"{change_pct:+.2f}%",
         )
-        c3.metric(
+        if weighted is not None:
+            c3.metric(
+                "重み付きアンサンブル",
+                fmt_num(weighted, 2),
+                delta=f"{weighted_change:+.2f}%",
+                help="5 銘柄ウォークフォワード検証(過去 5 年)から導出した重み付き平均。technical 35% / mean_reversion 25% / monte_carlo 25% / linear 15%",
+            )
+        else:
+            c3.metric("重み付きアンサンブル", "—")
+        c4.metric(
             "予測レンジ",
             f"{fmt_num(band.get('low'), 1)} 〜 {fmt_num(band.get('high'), 1)}",
         )
@@ -847,6 +859,78 @@ with tab_pdca:
         "**Plan**(予測モデル定義)→ **Do**(予測タブで保存)→ "
         "**Check**(目標日後にここで検証)→ **Act**(精度の高いモデルに重みを寄せる)。"
     )
+
+    # ── 5 銘柄ウォークフォワード PDCA レポート(プリセット)──
+    pdca_report = ROOT / "outputs" / "pdca_5stocks_report.md"
+    if pdca_report.exists():
+        with st.expander(
+            "📋 5 銘柄ウォークフォワード PDCA レポート(過去 5 年実走の総括)",
+            expanded=False,
+        ):
+            st.markdown(pdca_report.read_text(encoding="utf-8"))
+
+    # ── 現銘柄でウォークフォワード実行 ──
+    st.markdown(f"##### この銘柄(`{ticker}`)で過去 5 年ウォークフォワード検証を実行")
+    st.caption("過去 5 年の毎月、その時点で 1 ヶ月先を予測 → 実際値と比較。約 60 サンプル × 4 モデル。所要 30 秒程度。")
+    wf_existing = latest_walk_forward(ticker)
+    cwf1, cwf2 = st.columns([2, 1])
+    with cwf1:
+        if wf_existing:
+            st.info(
+                f"既存結果あり: 実行日 {wf_existing.get('executed_at', '')[:10]} / サンプル {wf_existing.get('samples_count')}"
+            )
+    with cwf2:
+        if st.button("🚀 ウォークフォワード実行", key=f"wf_run_{ticker}"):
+            with st.spinner(f"{ticker} 5 年ウォークフォワード検証中..."):
+                try:
+                    result = run_walk_forward(ticker, years=5, step_days=21, forecast_days=21)
+                    if "error" not in result:
+                        save_walk_forward(ticker, result)
+                        st.success("実行完了。下に結果を表示します。")
+                        wf_existing = result
+                    else:
+                        st.error(result["error"])
+                except Exception as e:
+                    st.error(f"実行エラー: {e}")
+
+    if wf_existing and not wf_existing.get("error"):
+        stats = wf_existing.get("stats_by_model") or {}
+        if stats:
+            wf_rows = []
+            for name, d in stats.items():
+                wf_rows.append(
+                    {
+                        "モデル": name,
+                        "サンプル": d.get("samples"),
+                        "平均絶対誤差(%)": d.get("avg_abs_error_pct"),
+                        "中央値誤差(%)": d.get("median_abs_error_pct"),
+                        "ヒット率(%)": d.get("hit_rate_5pct"),
+                        "方向当たり率(%)": d.get("direction_hit_rate"),
+                        "バイアス(%)": d.get("bias_pct"),
+                    }
+                )
+            df_wf = pd.DataFrame(wf_rows)
+            st.dataframe(
+                df_wf,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "平均絶対誤差(%)": st.column_config.NumberColumn(format="%.2f"),
+                    "中央値誤差(%)": st.column_config.NumberColumn(format="%.2f"),
+                    "ヒット率(%)": st.column_config.NumberColumn(format="%.1f"),
+                    "方向当たり率(%)": st.column_config.NumberColumn(format="%.1f"),
+                    "バイアス(%)": st.column_config.NumberColumn(format="%+.2f"),
+                },
+            )
+
+    st.markdown("##### 現在採用中のモデル重み(Act 反映済み)")
+    weights_df = pd.DataFrame(
+        [{"モデル": k, "重み": f"{v * 100:.0f}%"} for k, v in WALK_FORWARD_WEIGHTS.items()]
+    )
+    st.dataframe(weights_df, use_container_width=True, hide_index=True)
+    st.caption("これらの重みは 5 銘柄ウォークフォワード検証から導出されています。レポートを見て自分で調整したい場合は `tools/predict.py` の `WALK_FORWARD_WEIGHTS` を編集してください。")
+
+    st.divider()
 
     agg = aggregate_accuracy()
     st.metric("検証済み予測の総数", agg["total_verified"])
