@@ -24,9 +24,27 @@ from plotly.subplots import make_subplots
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
 
+from backtest import (  # noqa: E402
+    HIT_THRESHOLD_PCT,
+    backtest_one_month,
+    derive_weights_from_backtest,
+)
+from extra_sources import (  # noqa: E402
+    all_external_links,
+    get_google_trends,
+    get_yfinance_news,
+)
 from fetch_stock import get_history, get_summary, get_technical  # noqa: E402
 from find_competitors import find_peers  # noqa: E402
 from macro_context import relevant_macros_for  # noqa: E402
+from predict import predict_all  # noqa: E402
+from prediction_log import (  # noqa: E402
+    aggregate_accuracy,
+    list_all_predictions,
+    list_pending_predictions,
+    save_prediction,
+    verify_prediction,
+)
 from scoring import find_themes_for_ticker, total_score  # noqa: E402
 from themes import THEMES  # noqa: E402
 
@@ -266,13 +284,26 @@ st.divider()
 
 
 # ───────── タブ構成 ─────────
-tab_fund, tab_tech, tab_peer, tab_theme, tab_macro, tab_raw = st.tabs(
+(
+    tab_fund,
+    tab_tech,
+    tab_peer,
+    tab_theme,
+    tab_macro,
+    tab_predict,
+    tab_news,
+    tab_pdca,
+    tab_raw,
+) = st.tabs(
     [
         "💰 ファンダメンタル",
         "📈 テクニカル",
         "🏢 競合比較",
         "🌐 関連テーマ",
         "🌍 マクロ環境",
+        "📊 1ヶ月予測",
+        "📰 ニュース・声",
+        "🔄 PDCA(予測精度)",
         "🔍 生データ",
     ]
 )
@@ -590,6 +621,327 @@ with tab_macro:
         f"💡 上記は `{ticker}` に強く関連するものを厳選しています。すべてのマクロ指標を見るには、"
         "`tools/themes.py` の `INDICES` を直接参照してください。"
     )
+
+
+# ───── 1ヶ月予測 ─────
+with tab_predict:
+    st.markdown("##### 1 ヶ月先(30 営業日後)の株価予測")
+    st.caption(
+        "5 つの素朴モデルで予測 → 中央値をアンサンブルとして出します。"
+        "**株価予測は学術的にもほぼ不可能(ランダムウォーク仮説)** とされており、"
+        "ここで出るのは「これらのモデルが想定するレンジ」です。投資助言ではありません。"
+    )
+
+    with st.spinner("予測モデルを実行中..."):
+        try:
+            history_for_pred = _history(ticker, "2y")
+            prediction = predict_all(history_for_pred, summary, technical, days_ahead=30)
+        except Exception as e:
+            st.error(f"予測実行に失敗しました: {e}")
+            prediction = None
+
+    if prediction and prediction.get("ensemble"):
+        cur = prediction["current"]
+        ens = prediction["ensemble"]
+        change_pct = prediction.get("ensemble_change_pct") or 0
+        band = prediction.get("ensemble_band") or {}
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("現在値", fmt_num(cur, 2))
+        c2.metric(
+            "アンサンブル予測(30 営業日後)",
+            fmt_num(ens, 2),
+            delta=f"{change_pct:+.2f}%",
+        )
+        c3.metric(
+            "予測レンジ",
+            f"{fmt_num(band.get('low'), 1)} 〜 {fmt_num(band.get('high'), 1)}",
+        )
+
+        st.markdown("##### 各モデルの内訳")
+        rows = []
+        for k, m in prediction["models"].items():
+            pred = m.get("predicted")
+            row = {
+                "モデル": m["label"],
+                "予測値": pred,
+                "現在値からの変化(%)": (pred - cur) / cur * 100 if pred and cur else None,
+                "計算方法": m["method"],
+            }
+            rows.append(row)
+        df_pred = pd.DataFrame(rows)
+        st.dataframe(
+            df_pred,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "予測値": st.column_config.NumberColumn(format="%.2f"),
+                "現在値からの変化(%)": st.column_config.NumberColumn(format="%.2f"),
+            },
+        )
+
+        # 予測ログ保存ボタン
+        st.divider()
+        st.markdown("##### 予測ログに保存(PDCA の Do)")
+        st.caption(
+            "保存すると、目標日(約 30 営業日 = 42 暦日後)以降に「予測精度」タブで実際値と比較できます。"
+        )
+        if st.button("💾 この予測を保存する", key=f"save_pred_{ticker}"):
+            try:
+                fp = save_prediction(ticker, cur, prediction, days_ahead=30)
+                st.success(f"保存しました: `{fp.relative_to(ROOT)}`")
+            except Exception as e:
+                st.error(f"保存に失敗: {e}")
+
+        # バックテスト(過去 30 日のデータで予測精度を即評価)
+        st.divider()
+        st.markdown("##### バックテスト(疑似 PDCA の Check)")
+        st.caption(
+            "「30 営業日前にこのモデルを使っていたら、今と比べてどれだけズレたか」を即評価します。"
+            f"誤差 ±{HIT_THRESHOLD_PCT}% 以内をヒット扱い。"
+        )
+        with st.spinner("バックテスト実行中..."):
+            bt = backtest_one_month(history_for_pred, summary, days_back=30)
+        if bt.get("error"):
+            st.warning(bt["error"])
+        else:
+            bs = bt["summary"]
+            b1, b2, b3, b4 = st.columns(4)
+            b1.metric("実際の 30 日変化", f"{bt.get('actual_change_pct', 0):+.2f}%")
+            b2.metric("ヒット率(5%以内)", f"{bs['hit_count']}/{bs['total_models']}")
+            b3.metric("平均絶対誤差", f"{bs['avg_abs_error_pct']:.2f}%")
+            b4.metric("過去終値", fmt_num(bt["past_close"], 2))
+
+            bt_rows = []
+            for name, r in bt["models"].items():
+                bt_rows.append(
+                    {
+                        "モデル": name,
+                        "予測値": r.get("predicted"),
+                        "実際値": r.get("actual"),
+                        "誤差(%)": r.get("error_pct"),
+                        "5%以内": "✅" if r.get("hit") else ("❌" if r.get("hit") is False else "—"),
+                        "方向当たり": "✅" if r.get("direction_hit") else ("❌" if r.get("direction_hit") is False else "—"),
+                    }
+                )
+            df_bt = pd.DataFrame(bt_rows)
+            st.dataframe(
+                df_bt,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "予測値": st.column_config.NumberColumn(format="%.2f"),
+                    "実際値": st.column_config.NumberColumn(format="%.2f"),
+                    "誤差(%)": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+
+            # 改善提案(Act)
+            st.markdown("##### 改善提案(PDCA の Act)")
+            weights = derive_weights_from_backtest(bt)
+            if weights:
+                wrows = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)
+                st.markdown(
+                    "バックテスト結果から、誤差の小さいモデルに重みを多く割り当てる場合の比率:"
+                )
+                w_text = "  ·  ".join([f"**{k}**: {v * 100:.0f}%" for k, v in wrows])
+                st.markdown(w_text)
+                st.caption(
+                    "次回サイクルでは上位モデルを優先する、低精度モデルを除外する、"
+                    "など方針判断の材料にしてください。"
+                )
+
+        st.info(
+            "⚠️ 1 ヶ月先の株価は学術的にほぼ予測不能とされています。"
+            "アンサンブルの値は「複数のシンプルな仮定が交差する付近」程度の意味しかありません。"
+            "判断材料の 1 つとして扱ってください。"
+        )
+    else:
+        st.warning("予測の実行に必要なデータが揃いませんでした(履歴が短い可能性)。")
+
+
+# ───── ニュース・声(センチメント代替) ─────
+with tab_news:
+    st.markdown("##### Yahoo Finance ニュース")
+    with st.spinner("ニュースを取得中..."):
+        news = get_yfinance_news(ticker, limit=10)
+    if not news:
+        st.info("ニュースが取得できませんでした。")
+    else:
+        for n in news:
+            published = n.get("published") or ""
+            if published and isinstance(published, str):
+                published_short = published[:16]
+            else:
+                published_short = ""
+            link = n.get("url") or ""
+            title = n["title"]
+            if link:
+                st.markdown(f"- **[{title}]({link})**  \n  📰 {n['publisher']}  ·  🕐 {published_short}")
+            else:
+                st.markdown(f"- **{title}**  \n  📰 {n['publisher']}  ·  🕐 {published_short}")
+
+    st.divider()
+
+    st.markdown("##### Google Trends 検索ボリューム(過去 3 か月)")
+    keywords = [(summary.get("name") or ticker)[:30], ticker]
+    with st.spinner("Google Trends を取得中..."):
+        trends = get_google_trends(keywords, timeframe="today 3-m")
+
+    if trends.get("error"):
+        st.warning(trends["error"])
+    else:
+        # 折れ線グラフ
+        df_tr = pd.DataFrame(trends["series"])
+        df_tr.index = pd.to_datetime(trends["dates"])
+        fig_tr = go.Figure()
+        for kw in trends["keywords"]:
+            if kw in df_tr.columns:
+                fig_tr.add_trace(
+                    go.Scatter(x=df_tr.index, y=df_tr[kw], mode="lines", name=kw)
+                )
+        fig_tr.update_layout(
+            height=300,
+            margin=dict(l=10, r=10, t=10, b=10),
+            template="plotly_white",
+            yaxis=dict(title="検索ボリューム(0-100)"),
+        )
+        st.plotly_chart(fig_tr, use_container_width=True)
+
+        # 直近 7 日 vs その前 7 日
+        if trends.get("trend_signal"):
+            st.markdown("##### トレンド変化(直近 7 日 vs その前 7 日)")
+            ts_rows = []
+            for kw, ts in trends["trend_signal"].items():
+                ts_rows.append(
+                    {
+                        "キーワード": kw,
+                        "最近 7 日平均": ts["recent_7d_avg"],
+                        "直前 7 日平均": ts["previous_7d_avg"],
+                        "変化(%)": ts["change_pct"],
+                        "判定": ts["label"],
+                    }
+                )
+            st.dataframe(pd.DataFrame(ts_rows), use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    st.markdown("##### 外部リンク(自動取得不可な SNS / 公式ページ)")
+    st.caption(
+        "X(旧 Twitter)・StockTwits は Cloudflare などのボット対策で自動取得できないため、"
+        "**新タブで開いて手動で確認**してください。Yahoo Finance / Google ニュース / TradingView も同様。"
+    )
+    links = all_external_links(ticker, summary.get("name"))
+    cols = st.columns(2)
+    for i, ln in enumerate(links):
+        with cols[i % 2]:
+            st.markdown(f"**{ln['label']}**  \n{ln['description']}")
+            st.markdown(f"[🔗 開く]({ln['url']})", unsafe_allow_html=True)
+
+
+# ───── PDCA(予測精度の蓄積)─────
+with tab_pdca:
+    st.markdown("### 予測精度の振り返り(全銘柄横断)")
+    st.caption(
+        "過去にこのアプリで保存した予測ログを集計します。"
+        "**Plan**(予測モデル定義)→ **Do**(予測タブで保存)→ "
+        "**Check**(目標日後にここで検証)→ **Act**(精度の高いモデルに重みを寄せる)。"
+    )
+
+    agg = aggregate_accuracy()
+    st.metric("検証済み予測の総数", agg["total_verified"])
+
+    # 検証待ち
+    pending = list_pending_predictions()
+    if pending:
+        st.markdown("##### 検証待ち(目標日経過、まだ実際値で照合していない)")
+        st.caption("下のボタンで、その時点の最新終値で一括検証します。")
+        for rec in pending:
+            cols = st.columns([2, 2, 1])
+            cols[0].markdown(
+                f"**{rec['ticker']}**  予測日: {rec['predicted_at']} → 目標日: {rec['target_date']}"
+            )
+            cols[1].markdown(
+                f"予測時の価格: {fmt_num(rec.get('current_price_at_prediction'), 2)} → "
+                f"アンサンブル予測: {fmt_num(rec.get('ensemble'), 2)}"
+            )
+            if cols[2].button(
+                "🔍 検証する",
+                key=f"verify_{rec.get('_filepath')}",
+            ):
+                try:
+                    actual_summary = _summary(rec["ticker"])
+                    actual_price = actual_summary.get("current_price")
+                    if actual_price is None:
+                        st.error("実際の株価取得に失敗")
+                    else:
+                        verify_prediction(rec, actual_price)
+                        st.success(
+                            f"検証完了: 予測 {fmt_num(rec.get('ensemble'), 2)} "
+                            f"vs 実際 {fmt_num(actual_price, 2)}"
+                        )
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"検証エラー: {e}")
+    else:
+        st.info("検証待ちの予測はありません。")
+
+    # モデル別精度集計
+    if agg["by_model"]:
+        st.markdown("##### モデル別の集計精度")
+        rows = []
+        for name, d in agg["by_model"].items():
+            rows.append(
+                {
+                    "モデル": name,
+                    "サンプル数": d["samples"],
+                    "平均絶対誤差(%)": d.get("avg_abs_error_pct"),
+                    "ヒット数(±5%)": d["hit_count_5pct"],
+                    "ヒット率(%)": d["hit_rate_5pct"],
+                }
+            )
+        df_acc = pd.DataFrame(rows)
+        st.dataframe(
+            df_acc,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "平均絶対誤差(%)": st.column_config.NumberColumn(format="%.2f"),
+                "ヒット率(%)": st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
+
+        st.markdown("##### Act の方針例")
+        # 平均絶対誤差が小さい順に並べて、上位を「優先候補」、下位を「除外候補」
+        sorted_models = sorted(
+            agg["by_model"].items(),
+            key=lambda kv: kv[1].get("avg_abs_error_pct") or 999,
+        )
+        if len(sorted_models) >= 2:
+            best = sorted_models[0]
+            worst = sorted_models[-1]
+            st.markdown(
+                f"- **最も誤差が小さいモデル**: `{best[0]}`(平均絶対誤差 {best[1].get('avg_abs_error_pct')}%)"
+                "  \n→ アンサンブルでの重みを増やす候補"
+            )
+            st.markdown(
+                f"- **最も誤差が大きいモデル**: `{worst[0]}`(平均絶対誤差 {worst[1].get('avg_abs_error_pct')}%)"
+                "  \n→ 除外、もしくはモデル式を見直す候補"
+            )
+    else:
+        st.info("検証済みの予測がありません。1ヶ月後にここで Check してください。")
+
+    # 全予測一覧
+    all_preds = list_all_predictions()
+    if all_preds:
+        with st.expander(f"📂 全予測ログ({len(all_preds)} 件)"):
+            for rec in all_preds[:20]:
+                status = "✅ 検証済み" if rec.get("verified") else "⏳ 検証待ち"
+                st.markdown(
+                    f"- **{rec['ticker']}** {rec['predicted_at']}{status} "
+                    f"→ 予測: {fmt_num(rec.get('ensemble'), 2)} "
+                    f"(現在値時 {fmt_num(rec.get('current_price_at_prediction'), 2)})"
+                )
 
 
 # ───── 生データ ─────

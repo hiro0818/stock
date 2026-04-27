@@ -12,11 +12,17 @@
 
 [Claude Code 公式](https://claude.com/claude-code) からインストール。
 
-### 2. Python と yfinance
+### 2. Python と必要パッケージ
 
 ```powershell
-pip install yfinance
+pip install yfinance streamlit plotly pandas pytrends
 ```
+
+| パッケージ | 用途 |
+|---|---|
+| yfinance | 株価・財務データの取得 |
+| streamlit + plotly + pandas | Web ダッシュボード |
+| pytrends | Google Trends(検索ボリューム) |
 
 ### 3. (任意)PDF 出力したいなら
 
@@ -58,6 +64,9 @@ streamlit run app.py
 | 🏢 競合比較 | 同業他社を yfinance の業界情報から自動列挙 + 横並び比較表 |
 | 🌐 関連テーマ | 銘柄が属するメタトレンド(AI / 半導体 / EV / クラウド など)と同テーマ銘柄の比較 |
 | 🌍 マクロ環境 | 銘柄に関係が深い指標(米金利 / VIX / ドル円 / 関連 ETF)を自動選別 |
+| **📊 1ヶ月予測** | **5 モデル(線形回帰 / 平均回帰 / アナリスト / テクニカル / モンテカルロ)+ 中央値アンサンブル。30 営業日前のデータでバックテスト → ヒット率と平均絶対誤差を即時表示。予測ログを保存して PDCA を回せる** |
+| **📰 ニュース・声** | **Yahoo Finance ニュース 10 件 + Google Trends(検索ボリューム推移)+ X / StockTwits / TradingView へのリンク** |
+| **🔄 PDCA(予測精度)** | **過去の予測ログを集計し、モデル別の平均誤差・ヒット率を表示。検証待ちの予測を「今の終値で照合」するボタン付き** |
 | 🔍 生データ | yfinance の生レスポンス + スコア計算の中身(裏取り用) |
 
 すべてキャッシュ TTL = 1 時間で、データ遅延を 1 時間以内に保ちます。
@@ -180,6 +189,10 @@ knowledge/
 │   ├── themes.py                   テーマ別銘柄バスケット + マクロ指数の定義
 │   ├── scoring.py                  5 観点の多角スコアリング
 │   ├── macro_context.py            銘柄から関連マクロ指標を自動選別
+│   ├── predict.py                  1ヶ月先株価予測(5 モデル + アンサンブル)
+│   ├── backtest.py                 過去 30 日でモデル精度評価(疑似 PDCA Check)
+│   ├── prediction_log.py           予測の永続化と検証(PDCA Do/Check/Act)
+│   ├── extra_sources.py            yfinance ニュース + Google Trends + 外部リンク
 │   ├── daily_check.py              watchlist 全銘柄の日次取得
 │   └── daily_check.ps1             Task Scheduler 用ラッパー
 ├── inputs/
