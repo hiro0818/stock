@@ -29,13 +29,32 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 from backtest import HIT_THRESHOLD_PCT, _technical_from_history  # noqa: E402
+from correlation import MACRO_CANDIDATES  # noqa: E402
 from fetch_stock import get_history  # noqa: E402
 from predict import (  # noqa: E402
     predict_linear,
+    predict_macro_linked,
     predict_mean_reversion,
     predict_monte_carlo,
     predict_technical,
 )
+
+
+# 検証時に使うコアマクロ指標(全候補だと API 呼び出しが多すぎるため、主要 12 個に絞る)
+CORE_MACROS = [
+    "^GSPC",   # S&P 500
+    "^IXIC",   # NASDAQ
+    "^N225",   # 日経 225
+    "^VIX",    # VIX
+    "^TNX",    # 米10年金利
+    "JPY=X",   # ドル円
+    "CL=F",    # 原油 WTI
+    "GC=F",    # 金
+    "BTC-USD", # ビットコイン
+    "XLK",     # Tech ETF
+    "XLE",     # Energy ETF
+    "XLF",     # Financials ETF
+]
 
 
 def run_walk_forward(
@@ -43,14 +62,27 @@ def run_walk_forward(
     years: int = 5,
     step_days: int = 21,
     forecast_days: int = 21,
+    use_macro: bool = True,
 ) -> dict:
     """ローリング検証を実行。
     forecast_days = 21 営業日(約 1 ヶ月)先を予測 → 実際値と比較。
-    step_days で次の検証時点まで進む。"""
+    step_days で次の検証時点まで進む。
+    use_macro=True で macro_linked モデルも検証(時間がかかる)。"""
     period = f"{years}y"
     history = get_history(ticker, period)
     if not history or len(history) < forecast_days + 90:
         return {"error": f"履歴が不足: {len(history)} 日分しかない"}
+
+    # マクロ指標の履歴を一括取得(キャッシュ的に再利用)
+    macro_histories = {}
+    if use_macro:
+        for m_ticker in CORE_MACROS:
+            try:
+                m_hist = get_history(m_ticker, period)
+                if m_hist:
+                    macro_histories[m_ticker] = m_hist
+            except Exception:
+                pass
 
     # 各時点でローリング(過去〜現在の history 内で window をずらす)
     samples: list[dict] = []
@@ -81,6 +113,20 @@ def run_walk_forward(
         }
         mc = predict_monte_carlo(past_history, forecast_days, n_paths=200)
         preds["monte_carlo"] = mc["median"] if mc else None
+
+        # マクロ連動予測(同時点までのマクロ履歴で計算)
+        if use_macro and macro_histories:
+            past_macro = {}
+            for m_t, m_hist in macro_histories.items():
+                # その時点の日付以下にトリミング
+                cutoff = past_history[-1]["date"]
+                trimmed = [h for h in m_hist if h.get("date") and h["date"] <= cutoff]
+                if len(trimmed) >= 90:
+                    past_macro[m_t] = trimmed
+            macro_pred = predict_macro_linked(past_history, past_macro, forecast_days)
+            preds["macro_linked"] = macro_pred["predicted"] if macro_pred else None
+        else:
+            preds["macro_linked"] = None
 
         # アンサンブル
         valid = [p for p in preds.values() if p is not None]

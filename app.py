@@ -37,8 +37,19 @@ from extra_sources import (  # noqa: E402
 from fetch_stock import get_history, get_summary, get_technical  # noqa: E402
 from find_competitors import find_peers  # noqa: E402
 from macro_context import relevant_macros_for  # noqa: E402
+from pdca_loop import latest_log as latest_pdca_log  # noqa: E402
+from policy_events import (  # noqa: E402
+    policy_news_links_jp,
+    policy_relevance_for,
+    upcoming_recurring_events,
+)
 from predict import WALK_FORWARD_WEIGHTS, predict_all  # noqa: E402
-from walk_forward import latest_walk_forward, run_walk_forward, save_walk_forward  # noqa: E402
+from walk_forward import (  # noqa: E402
+    CORE_MACROS,
+    latest_walk_forward,
+    run_walk_forward,
+    save_walk_forward,
+)
 from prediction_log import (  # noqa: E402
     aggregate_accuracy,
     list_all_predictions,
@@ -293,6 +304,7 @@ st.divider()
     tab_macro,
     tab_predict,
     tab_news,
+    tab_policy,
     tab_pdca,
     tab_raw,
 ) = st.tabs(
@@ -304,6 +316,7 @@ st.divider()
         "🌍 マクロ環境",
         "📊 1ヶ月予測",
         "📰 ニュース・声",
+        "🏛️ 政策・地政学",
         "🔄 PDCA(予測精度)",
         "🔍 生データ",
     ]
@@ -633,10 +646,25 @@ with tab_predict:
         "ここで出るのは「これらのモデルが想定するレンジ」です。投資助言ではありません。"
     )
 
-    with st.spinner("予測モデルを実行中..."):
+    with st.spinner("予測モデルを実行中(マクロ指標 12 種を含む)..."):
         try:
             history_for_pred = _history(ticker, "2y")
-            prediction = predict_all(history_for_pred, summary, technical, days_ahead=30)
+            # マクロ指標履歴を取得(キャッシュ済み)
+            macro_histories_pred = {}
+            for m_t in CORE_MACROS:
+                try:
+                    m_hist = _history(m_t, "2y")
+                    if m_hist:
+                        macro_histories_pred[m_t] = m_hist
+                except Exception:
+                    pass
+            prediction = predict_all(
+                history_for_pred,
+                summary,
+                technical,
+                days_ahead=30,
+                macro_histories=macro_histories_pred,
+            )
         except Exception as e:
             st.error(f"予測実行に失敗しました: {e}")
             prediction = None
@@ -691,6 +719,35 @@ with tab_predict:
                 "現在値からの変化(%)": st.column_config.NumberColumn(format="%.2f"),
             },
         )
+
+        # マクロ連動の内訳表示
+        macro_model = prediction["models"].get("macro_linked")
+        if macro_model and macro_model.get("contributions"):
+            with st.expander("📌 マクロ連動予測の内訳(相関上位 5 指標)"):
+                macro_rows = []
+                for c in macro_model["contributions"]:
+                    macro_rows.append(
+                        {
+                            "マクロ指標": c["macro_label"],
+                            "相関係数": c["correlation"],
+                            "マクロの予測変化(%)": c["macro_change_pct"],
+                            "銘柄への含意(%)": c["stock_implied_change_pct"],
+                        }
+                    )
+                st.dataframe(
+                    pd.DataFrame(macro_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "相関係数": st.column_config.NumberColumn(format="%.3f"),
+                        "マクロの予測変化(%)": st.column_config.NumberColumn(format="%.2f"),
+                        "銘柄への含意(%)": st.column_config.NumberColumn(format="%.2f"),
+                    },
+                )
+                st.caption(
+                    "相関係数:正なら同方向、負なら逆方向に動く傾向。"
+                    "「銘柄への含意」 = 相関 × マクロの予測変化率。これらを |相関| で加重平均して macro_linked の予測値が出る。"
+                )
 
         # 予測ログ保存ボタン
         st.divider()
@@ -851,6 +908,56 @@ with tab_news:
             st.markdown(f"[🔗 開く]({ln['url']})", unsafe_allow_html=True)
 
 
+# ───── 政策・地政学(米中日)─────
+with tab_policy:
+    st.markdown("### 🇺🇸🇨🇳🇯🇵 米中日政府の政策・地政学イベント")
+    st.caption(
+        "リアルタイムなトランプ発言・FRB 声明などの自動取得は SNS ボットブロックなどで困難なため、"
+        "**Google ニュース検索リンク + 既知イベントカレンダー** で対応します。クリックで新タブが開きます。"
+    )
+
+    # 銘柄固有の政策影響度
+    themes_in = find_themes_for_ticker(ticker, THEMES)
+    relevance = policy_relevance_for(ticker, summary, themes_in)
+    if relevance:
+        st.markdown(f"##### 📌 `{ticker}` に特に影響しやすい政策")
+        for r in relevance:
+            st.markdown(
+                f"<div style='border-left:4px solid #ffa726; padding:8px 12px; margin:6px 0; background:#fafafa;'>"
+                f"<b>{r['policy']}</b><br/>{r['impact']}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    st.divider()
+
+    # ニュース検索リンク
+    st.markdown("##### 📰 政策・地政学ニュース検索リンク")
+    st.caption("クリックで新タブが開き、Google ニュースの検索結果が表示されます。")
+    links = policy_news_links_jp()
+    by_country: dict[str, list] = {}
+    for ln in links:
+        by_country.setdefault(ln["country"], []).append(ln)
+    for country, items in by_country.items():
+        st.markdown(f"**{country}**")
+        cols = st.columns(2)
+        for i, ln in enumerate(items):
+            cols[i % 2].markdown(f"- [🔗 {ln['label']}]({ln['url']})")
+        st.markdown("")
+
+    st.divider()
+
+    # 既知イベントカレンダー
+    st.markdown("##### 🗓️ 主要な政策イベントカレンダー(年中行事)")
+    events = upcoming_recurring_events()
+    df_events = pd.DataFrame(events)
+    st.dataframe(
+        df_events,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 # ───── PDCA(予測精度の蓄積)─────
 with tab_pdca:
     st.markdown("### 予測精度の振り返り(全銘柄横断)")
@@ -860,14 +967,98 @@ with tab_pdca:
         "**Check**(目標日後にここで検証)→ **Act**(精度の高いモデルに重みを寄せる)。"
     )
 
-    # ── 5 銘柄ウォークフォワード PDCA レポート(プリセット)──
-    pdca_report = ROOT / "outputs" / "pdca_5stocks_report.md"
-    if pdca_report.exists():
+    # ── 過去レポート(プリセット)──
+    pdca_v2 = ROOT / "outputs" / "pdca_v2_report.md"
+    pdca_v1 = ROOT / "outputs" / "pdca_5stocks_report.md"
+    if pdca_v2.exists():
         with st.expander(
-            "📋 5 銘柄ウォークフォワード PDCA レポート(過去 5 年実走の総括)",
+            "📋 PDCA レポート v2(10 銘柄 + マクロ連動 + 20 サイクル学習)",
             expanded=False,
         ):
-            st.markdown(pdca_report.read_text(encoding="utf-8"))
+            st.markdown(pdca_v2.read_text(encoding="utf-8"))
+    if pdca_v1.exists():
+        with st.expander(
+            "📋 PDCA レポート v1(5 銘柄ウォークフォワード)",
+            expanded=False,
+        ):
+            st.markdown(pdca_v1.read_text(encoding="utf-8"))
+
+    # ── 20 サイクル学習ログのチャート ──
+    cycle_log = latest_pdca_log()
+    if cycle_log and cycle_log.get("history"):
+        st.markdown("##### 📈 20 サイクル PDCA 重み学習の推移")
+        history = cycle_log["history"]
+        df_cyc = pd.DataFrame(
+            [
+                {
+                    "サイクル": h["cycle"],
+                    "平均絶対誤差(%)": h["ensemble_avg_abs_error_pct"],
+                    "方向当たり率(%)": h["ensemble_direction_hit_rate"],
+                }
+                for h in history
+            ]
+        )
+        fig_cyc = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_cyc.add_trace(
+            go.Scatter(
+                x=df_cyc["サイクル"],
+                y=df_cyc["平均絶対誤差(%)"],
+                mode="lines+markers",
+                name="平均絶対誤差(%)",
+                line=dict(color="#ef5350"),
+            ),
+            secondary_y=False,
+        )
+        fig_cyc.add_trace(
+            go.Scatter(
+                x=df_cyc["サイクル"],
+                y=df_cyc["方向当たり率(%)"],
+                mode="lines+markers",
+                name="方向当たり率(%)",
+                line=dict(color="#26a69a"),
+            ),
+            secondary_y=True,
+        )
+        fig_cyc.update_layout(
+            height=320,
+            margin=dict(l=10, r=10, t=10, b=10),
+            template="plotly_white",
+        )
+        fig_cyc.update_yaxes(title_text="平均絶対誤差(%)", secondary_y=False)
+        fig_cyc.update_yaxes(title_text="方向当たり率(%)", secondary_y=True)
+        st.plotly_chart(fig_cyc, use_container_width=True)
+
+        # 重みの推移(積み上げ)
+        st.markdown("##### 重みの推移(積み上げ面)")
+        weight_df = pd.DataFrame(
+            [{"サイクル": h["cycle"], **h["weights"]} for h in history]
+        )
+        fig_w = go.Figure()
+        for col in ["linear", "mean_reversion", "technical", "monte_carlo", "macro_linked"]:
+            if col in weight_df.columns:
+                fig_w.add_trace(
+                    go.Scatter(
+                        x=weight_df["サイクル"],
+                        y=weight_df[col],
+                        mode="lines",
+                        stackgroup="one",
+                        name=col,
+                    )
+                )
+        fig_w.update_layout(
+            height=300,
+            margin=dict(l=10, r=10, t=10, b=10),
+            template="plotly_white",
+            yaxis=dict(title="重み(合計 1.0)", range=[0, 1]),
+        )
+        st.plotly_chart(fig_w, use_container_width=True)
+
+        st.markdown("##### 最終収束重み(predict.py に反映済み)")
+        final_w = cycle_log.get("final_weights", {})
+        df_final = pd.DataFrame(
+            [{"モデル": k, "重み": f"{v * 100:.1f}%"} for k, v in final_w.items()]
+        )
+        st.dataframe(df_final, use_container_width=True, hide_index=True)
 
     # ── 現銘柄でウォークフォワード実行 ──
     st.markdown(f"##### この銘柄(`{ticker}`)で過去 5 年ウォークフォワード検証を実行")

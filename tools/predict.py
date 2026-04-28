@@ -21,16 +21,21 @@ import math
 import statistics
 from typing import Iterable
 
-# ───────── ウォークフォワード検証から導出した重み(PDCA の Act)─────────
-# 5 銘柄 × 50 サンプルの walk-forward 検証(2026-04-28 実施)で
-# 各モデルの平均絶対誤差から導出した重み付き平均用の係数。
-# 詳細: outputs/pdca_5stocks_report.md
+from correlation import find_top_correlations  # noqa: E402
+
+# ───────── 20 サイクル PDCA で収束した重み(Act の自動学習結果)─────────
+# 10 銘柄(AAPL/NVDA/MSFT/7203.T/6758.T/XOM/CVX/NEM/COIN/MSTR)× 5 年の
+# walk-forward サンプルを使い、20 サイクルの重み更新ループ(誤差逆数比例 + 学習率 0.15)で
+# 自動収束させた重み。詳細: outputs/pdca_loop_*.json と outputs/pdca_v2_report.md
+#
+# 5 モデル(マクロ連動を含む):
 WALK_FORWARD_WEIGHTS: dict[str, float] = {
-    "technical": 0.35,        # 平均誤差 7.21%(最小)
-    "mean_reversion": 0.25,   # 平均誤差 7.73%
-    "monte_carlo": 0.25,      # 平均誤差 8.14%(方向当たり率は最高 54.4%)
-    "linear": 0.15,           # 平均誤差 10.39%(最大、トレンド時に過大予測しがち)
-    # アナリスト目標は時点が固定で walk-forward と整合しないため重みなし(参考値扱い)
+    "technical": 0.257,       # 平均誤差 10.18%(最小)→ 最大重み
+    "macro_linked": 0.220,    # 平均誤差 11.14%(マクロ連動、原油/金/BTC など)
+    "mean_reversion": 0.217,  # 平均誤差 11.11%
+    "monte_carlo": 0.190,     # 平均誤差 11.92%(方向当たり率は高い)
+    "linear": 0.116,          # 平均誤差 15.51%(最大、トレンド時に過大予測)→ 最小重み
+    # アナリスト目標は時点固定で walk-forward と整合しないため重みなし(参考値)
 }
 
 
@@ -162,6 +167,91 @@ def predict_monte_carlo(history: list[dict], days_ahead: int = 30, n_paths: int 
     }
 
 
+def predict_macro_linked(
+    history: list[dict],
+    macro_histories: dict[str, list[dict]],
+    days_ahead: int = 30,
+) -> dict | None:
+    """銘柄と高相関のマクロ指標を特定し、それぞれの線形外挿を相関係数で加重して銘柄予測を作る。
+
+    Args:
+      history: 銘柄の履歴
+      macro_histories: {macro_ticker: history}(マクロ指標の履歴)
+      days_ahead: 何日先を予測するか
+
+    Returns:
+      {"predicted": float, "correlations": [...], "macro_changes": [...]}
+    """
+    closes = [h["close"] for h in history if h.get("close") is not None]
+    if len(closes) < 90 or not macro_histories:
+        return None
+
+    current = closes[-1]
+
+    # 相関計算
+    correlations = find_top_correlations(
+        history, macro_histories, window=90, min_abs_corr=0.3, top_n=5
+    )
+    if not correlations:
+        return None
+
+    # 各マクロ指標の対数リターンを線形外挿
+    macro_log_predictions = {}
+    macro_change_pcts = {}
+    for c in correlations:
+        m_ticker = c["ticker"]
+        m_hist = macro_histories.get(m_ticker, [])
+        m_closes = [h["close"] for h in m_hist if h.get("close") is not None]
+        if len(m_closes) < 30:
+            continue
+        m_pred = predict_linear(m_hist, days_ahead)
+        if m_pred is None or m_closes[-1] <= 0 or m_pred <= 0:
+            continue
+        log_return = math.log(m_pred / m_closes[-1])
+        macro_log_predictions[m_ticker] = log_return
+        macro_change_pcts[m_ticker] = (m_pred - m_closes[-1]) / m_closes[-1] * 100
+
+    if not macro_log_predictions:
+        return None
+
+    # 加重平均(相関係数の絶対値で重み付け)
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    contributions = []
+    for c in correlations:
+        m_ticker = c["ticker"]
+        if m_ticker not in macro_log_predictions:
+            continue
+        weight = abs(c["correlation"])
+        macro_lr = macro_log_predictions[m_ticker]
+        # 銘柄ログリターン = 相関係数 × マクロログリターン
+        stock_lr = c["correlation"] * macro_lr
+        weighted_sum += stock_lr * weight
+        weight_sum += weight
+        contributions.append(
+            {
+                "macro_ticker": m_ticker,
+                "macro_label": c["label"],
+                "correlation": c["correlation"],
+                "macro_change_pct": macro_change_pcts[m_ticker],
+                "stock_implied_change_pct": (math.exp(stock_lr) - 1) * 100,
+            }
+        )
+
+    if weight_sum == 0:
+        return None
+
+    predicted_log_return = weighted_sum / weight_sum
+    predicted = current * math.exp(predicted_log_return)
+
+    return {
+        "predicted": predicted,
+        "predicted_change_pct": (predicted - current) / current * 100,
+        "correlations": correlations,
+        "contributions": contributions,
+    }
+
+
 # ───────── アンサンブル ─────────
 
 
@@ -170,6 +260,7 @@ def predict_all(
     summary: dict,
     technical: dict,
     days_ahead: int = 30,
+    macro_histories: dict[str, list[dict]] | None = None,
 ) -> dict:
     """全モデルを実行してまとめる。"""
     closes = [h["close"] for h in history if h.get("close") is not None]
@@ -211,6 +302,24 @@ def predict_all(
         "p25": mc["p25"] if mc else None,
         "p75": mc["p75"] if mc else None,
     }
+
+    # マクロ連動予測(macro_histories が提供されている場合のみ)
+    if macro_histories:
+        macro_pred = predict_macro_linked(history, macro_histories, days_ahead)
+        if macro_pred:
+            out["models"]["macro_linked"] = {
+                "label": "マクロ連動(相関上位 5 指標の加重)",
+                "predicted": macro_pred["predicted"],
+                "method": "相関の高いマクロ指標(原油/金/BTC/金利/為替/ETF など)を線形外挿し、相関係数で加重",
+                "correlations": macro_pred["correlations"],
+                "contributions": macro_pred["contributions"],
+            }
+        else:
+            out["models"]["macro_linked"] = {
+                "label": "マクロ連動",
+                "predicted": None,
+                "method": "高相関(|r|≥0.3)のマクロ指標が見つからず実行不可",
+            }
 
     # アンサンブル(中央値): 外れ値耐性
     valid_preds = [m["predicted"] for m in out["models"].values() if m["predicted"] is not None]
