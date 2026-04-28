@@ -38,7 +38,8 @@ MODELS = [
     "monte_carlo",
     "macro_linked",
     "lightgbm_ml",      # PDCA cycle 7 で追加
-    "crypto_linked",    # PDCA cycle 6 で追加(暗号銘柄向け、他では効果薄い)
+    "crypto_linked",    # PDCA cycle 6 で追加
+    "technical_v2",     # PDCA v4 で追加(7 指標統合: Bollinger/Stoch/ADX/OBV/Donchian/CCI/ATR)
 ]
 
 

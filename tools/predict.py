@@ -30,15 +30,17 @@ from correlation import find_top_correlations  # noqa: E402
 #
 # 5 モデル(マクロ連動を含む):
 WALK_FORWARD_WEIGHTS: dict[str, float] = {
-    # v3: 10 銘柄 × 7 モデル × 20 サイクル PDCA で自動収束した重み(2026-04-28、outputs/pdca_loop_20260428-1502.json)
-    # 結果: 誤差 10.32%(v2: 10.47%)、方向当たり率 54.6%(v2: 53.2%)
-    "crypto_linked": 0.171,   # 全銘柄での誤差最小 10.16%(暗号以外でも穏当な予測になる)
-    "technical": 0.170,       # 既存最良、誤差 10.18%
-    "lightgbm_ml": 0.152,     # ML、方向当たり率 56.2%(全モデル最良)
-    "macro_linked": 0.151,    # マクロ連動 11.08%
-    "mean_reversion": 0.144,  # 平均回帰 11.11%
-    "monte_carlo": 0.126,     # MC 11.92%
-    "linear": 0.085,          # 誤差 14.65% で最大、最小重み
+    # v4: 10 銘柄 × 8 モデル × 20 サイクル PDCA で自動収束した重み
+    # (2026-04-28、outputs/pdca_loop_20260428-1555.json)
+    # 結果: 誤差 10.27%(v3: 10.32%)、方向当たり率 54.8%(v3: 54.6%)
+    "technical_v2": 0.147,    # 文献ベース 7 指標統合(Brock 1992 / Lo 2000 ベース)、誤差 10.11%(全モデル最小)
+    "crypto_linked": 0.146,   # BTC ベータモデル
+    "technical": 0.145,       # 既存テクニカル
+    "lightgbm_ml": 0.130,     # ML、方向当たり率 56.2%
+    "macro_linked": 0.129,    # マクロ連動
+    "mean_reversion": 0.123,  # 平均回帰
+    "monte_carlo": 0.107,     # MC
+    "linear": 0.073,          # 線形回帰、最小重み
 }
 
 
@@ -299,6 +301,21 @@ def predict_all(
         "predicted": predict_technical(history, technical, days_ahead),
         "method": "RSI / MACD / MA配置 / レンジ位置から ±5%/月 内で推定",
     }
+
+    # v4 PDCA: 7 指標統合のテクニカル(Bollinger/Stochastic/ADX/OBV/Donchian/CCI/ATR)
+    try:
+        from technical_advanced import predict_technical_advanced
+        adv = predict_technical_advanced(history, days_ahead)
+        if adv:
+            out["models"]["technical_v2"] = {
+                "label": "テクニカル v2(7 指標統合、Brock 1992 / Lo 2000 ベース)",
+                "predicted": adv["predicted"],
+                "method": "Bollinger %B + Stochastic + ADX + OBV ダイバージェンス + Donchian + CCI を投票集計",
+                "score": adv["score"],
+                "votes": adv["votes"],
+            }
+    except Exception:
+        pass
     mc = predict_monte_carlo(history, days_ahead)
     out["models"]["monte_carlo"] = {
         "label": "モンテカルロ(対数正規)",
