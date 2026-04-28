@@ -251,31 +251,78 @@ with hero_col1:
     st.metric("総合スコア", f"{score['総合スコア']} / 100")
 
 with hero_col2:
-    # 観点別スコアを横棒で
+    # 観点別スコアを五角形(レーダーチャート)で
     axes = score["観点別"]
-    df_axes = pd.DataFrame(
-        [{"観点": k, "スコア": v["score"]} for k, v in axes.items()]
-    )
-    bar = go.Figure(
-        go.Bar(
-            x=df_axes["スコア"],
-            y=df_axes["観点"],
-            orientation="h",
-            marker_color=df_axes["スコア"].apply(
-                lambda s: "#26a69a" if s >= 65 else ("#ffb74d" if s >= 45 else "#ef5350")
-            ),
-            text=df_axes["スコア"],
-            textposition="outside",
+    labels = list(axes.keys())
+    values = [axes[k]["score"] for k in labels]
+
+    # 閉じた多角形にするため最初の点を末尾に追加
+    labels_closed = labels + [labels[0]]
+    values_closed = values + [values[0]]
+
+    # 総合スコアに応じて色を決める
+    avg_score = score["総合スコア"]
+    if avg_score >= 65:
+        line_color = "#26a69a"
+        fill_color = "rgba(38, 166, 154, 0.30)"
+    elif avg_score >= 45:
+        line_color = "#ffa726"
+        fill_color = "rgba(255, 167, 38, 0.30)"
+    else:
+        line_color = "#ef5350"
+        fill_color = "rgba(239, 83, 80, 0.30)"
+
+    radar = go.Figure()
+    # 50 ライン(中立基準)を背景に薄く表示
+    radar.add_trace(
+        go.Scatterpolar(
+            r=[50] * len(labels_closed),
+            theta=labels_closed,
+            mode="lines",
+            line=dict(color="rgba(160,160,160,0.5)", dash="dot", width=1),
+            name="中立 50",
+            hoverinfo="skip",
+            showlegend=False,
         )
     )
-    bar.update_layout(
-        height=240,
-        margin=dict(l=10, r=30, t=10, b=10),
-        xaxis=dict(range=[0, 100], title=""),
-        yaxis=dict(title=""),
+    # 銘柄スコアの 5 角形
+    radar.add_trace(
+        go.Scatterpolar(
+            r=values_closed,
+            theta=labels_closed,
+            mode="lines+markers+text",
+            fill="toself",
+            line=dict(color=line_color, width=2.5),
+            fillcolor=fill_color,
+            marker=dict(size=8, color=line_color),
+            text=[str(v) for v in values_closed],
+            textposition="top center",
+            textfont=dict(size=12, color=line_color),
+            name="スコア",
+            hovertemplate="%{theta}: %{r}/100<extra></extra>",
+        )
+    )
+    radar.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100],
+                tickvals=[20, 40, 60, 80, 100],
+                gridcolor="rgba(180,180,180,0.4)",
+                tickfont=dict(size=10, color="#888"),
+            ),
+            angularaxis=dict(
+                gridcolor="rgba(180,180,180,0.4)",
+                tickfont=dict(size=12),
+            ),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        height=340,
+        margin=dict(l=40, r=40, t=10, b=10),
+        showlegend=False,
         template="plotly_white",
     )
-    st.plotly_chart(bar, use_container_width=True)
+    st.plotly_chart(radar, use_container_width=True)
 
 # 強み / 弱み
 strength_col, weakness_col = st.columns(2)

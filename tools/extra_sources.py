@@ -140,14 +140,31 @@ def yahoo_finance_url(ticker: str) -> str:
     return f"https://finance.yahoo.com/quote/{ticker}/"
 
 
+def youtube_search_url(ticker: str, name: str | None = None, lang: str = "auto") -> str:
+    """YouTube 検索 URL。日本株は日本語、米国株は英語で検索。"""
+    nm = name or ticker
+    is_jp = ticker.upper().endswith(".T")
+    if lang == "ja" or (lang == "auto" and is_jp):
+        q = f"{nm} 株 分析"
+    else:
+        q = f"{nm} stock analysis"
+    return f"https://www.youtube.com/results?search_query={quote(q)}&sp=CAI%253D"  # sp=CAI=最近順
+
+
 def all_external_links(ticker: str, name: str | None = None) -> list[dict]:
     """銘柄に関する外部リンクをまとめて返す。"""
     nm = name or ticker
+    is_jp = ticker.upper().endswith(".T")
     return [
         {
             "label": "📰 X 検索(キャッシュタグ)",
             "url": x_search_url(ticker),
             "description": "$AAPL のような形でリアルタイムツイートを検索。新タブで開く。",
+        },
+        {
+            "label": "🎥 YouTube 検索(最近順)",
+            "url": youtube_search_url(ticker, nm),
+            "description": f"{nm} の最近の解説・速報動画を YouTube で検索。日本株は日本語、米株は英語クエリ。",
         },
         {
             "label": "💬 StockTwits",
@@ -161,7 +178,7 @@ def all_external_links(ticker: str, name: str | None = None) -> list[dict]:
         },
         {
             "label": "🔍 Google ニュース",
-            "url": f"https://news.google.com/search?q={quote(nm + ' stock')}&hl=ja",
+            "url": f"https://news.google.com/search?q={quote(nm + (' 株' if is_jp else ' stock'))}&hl=ja",
             "description": f"{nm} の最新ニュースを Google ニュースで検索。",
         },
         {
