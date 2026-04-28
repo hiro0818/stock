@@ -469,6 +469,37 @@ with tab_tech:
         fig.update_yaxes(title_text="MACD", row=3, col=1)
         st.plotly_chart(fig, use_container_width=True)
 
+        # v5: 文献ベース 10 指標(Bollinger/Stoch/ADX/ATR/OBV/Donchian/CCI/Williams%R/Ichimoku/PSAR)
+        try:
+            from technical_advanced import all_advanced
+            adv_inds = all_advanced(history)
+            with st.expander("📚 文献ベース テクニカル 10 指標(Brock 1992 / Lo 2000 ベース)", expanded=False):
+                rows = []
+                bb = adv_inds.get("bollinger") or {}
+                rows.append({"指標": "Bollinger Bands", "値": f"%B={bb.get('pct_b', 0):.2f}", "シグナル": bb.get("signal", "—")})
+                stch = adv_inds.get("stochastic") or {}
+                rows.append({"指標": "Stochastic %K/%D", "値": f"%K={stch.get('%K', 0):.1f}, %D={stch.get('%D', 0):.1f}", "シグナル": f"{stch.get('signal', '—')} / {stch.get('cross', '')}"})
+                ad = adv_inds.get("adx") or {}
+                rows.append({"指標": "ADX + DI", "値": f"ADX={ad.get('ADX', 0):.1f} (+DI={ad.get('+DI', 0):.1f}, -DI={ad.get('-DI', 0):.1f})", "シグナル": f"{ad.get('trend_strength', '—')} / {ad.get('direction', '')}"})
+                at = adv_inds.get("atr")
+                rows.append({"指標": "ATR(14)", "値": f"{at:.2f}" if at else "—", "シグナル": "ボラティリティ指標"})
+                ob = adv_inds.get("obv") or {}
+                rows.append({"指標": "OBV", "値": f"傾き={ob.get('obv_slope', 0):.0f}", "シグナル": ob.get("signal", "—")})
+                dc = adv_inds.get("donchian") or {}
+                rows.append({"指標": "Donchian(20日)", "値": f"H={dc.get('high', 0):.2f}, L={dc.get('low', 0):.2f}", "シグナル": dc.get("breakout", "—")})
+                ci = adv_inds.get("cci") or {}
+                rows.append({"指標": "CCI(20日)", "値": f"{ci.get('CCI', 0):.1f}", "シグナル": ci.get("signal", "—")})
+                wr = adv_inds.get("williams_r") or {}
+                rows.append({"指標": "Williams %R", "値": f"{wr.get('value', 0):.1f}", "シグナル": wr.get("signal", "—")})
+                ich = adv_inds.get("ichimoku") or {}
+                rows.append({"指標": "一目均衡表", "値": f"転換={ich.get('tenkan', 0):.2f}, 基準={ich.get('kijun', 0):.2f}", "シグナル": f"{ich.get('cloud_position', '—')} / {ich.get('tk_cross', '')}"})
+                pa = adv_inds.get("psar") or {}
+                rows.append({"指標": "Parabolic SAR", "値": f"{pa.get('psar', 0):.2f}", "シグナル": f"{pa.get('trend', '—')} / {pa.get('signal', '')}"})
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                st.caption("⭐ シグナル重複(過熱: %B>0.85 + CCI>100 + Stoch>80 など)で高確度判定の参考に。")
+        except Exception as e:
+            st.caption(f"v2 指標の計算に失敗: {e}")
+
         # 解釈コメント
         st.markdown("##### テクニカルの解釈")
         tech_score = score["観点別"]["テクニカル"]

@@ -248,8 +248,121 @@ def cci(highs: list[float], lows: list[float], closes: list[float], window: int 
     }
 
 
+def williams_r(highs: list[float], lows: list[float], closes: list[float], window: int = 14) -> dict | None:
+    """Williams %R(-100〜0、-20以上で過熱、-80以下で過売)。"""
+    if len(closes) < window:
+        return None
+    h = max(highs[-window:])
+    l = min(lows[-window:])
+    c = closes[-1]
+    if h == l:
+        return {"value": -50, "signal": "中立"}
+    val = -100 * (h - c) / (h - l)
+    return {
+        "value": val,
+        "signal": (
+            "買われすぎ" if val > -20
+            else "売られすぎ" if val < -80
+            else "中立"
+        ),
+    }
+
+
+def ichimoku(highs: list[float], lows: list[float], closes: list[float]) -> dict | None:
+    """一目均衡表。転換線(9日)/ 基準線(26日)/ 先行スパン A,B / 雲。"""
+    if len(closes) < 52:
+        return None
+    last = closes[-1]
+    # 転換線(9 日高安平均)
+    tenkan = (max(highs[-9:]) + min(lows[-9:])) / 2
+    # 基準線(26 日高安平均)
+    kijun = (max(highs[-26:]) + min(lows[-26:])) / 2
+    # 先行スパン A(転換 + 基準) / 2、26 日先行
+    span_a = (tenkan + kijun) / 2
+    # 先行スパン B(52 日高安平均)
+    span_b = (max(highs[-52:]) + min(lows[-52:])) / 2
+
+    cloud_top = max(span_a, span_b)
+    cloud_bottom = min(span_a, span_b)
+
+    # 価格と雲の関係
+    if last > cloud_top:
+        cloud_pos = "雲の上(強気)"
+    elif last < cloud_bottom:
+        cloud_pos = "雲の下(弱気)"
+    else:
+        cloud_pos = "雲の中(レンジ)"
+
+    # 転換 vs 基準のクロス
+    cross = "転換 > 基準(買い)" if tenkan > kijun else "転換 < 基準(売り)"
+
+    return {
+        "tenkan": tenkan,
+        "kijun": kijun,
+        "span_a": span_a,
+        "span_b": span_b,
+        "cloud_top": cloud_top,
+        "cloud_bottom": cloud_bottom,
+        "last": last,
+        "cloud_position": cloud_pos,
+        "tk_cross": cross,
+    }
+
+
+def psar(highs: list[float], lows: list[float], af_init: float = 0.02, af_max: float = 0.20) -> dict | None:
+    """Parabolic SAR(トレンド転換シグナル)。"""
+    if len(highs) < 30:
+        return None
+    n = len(highs)
+    psar_vals = [lows[0]]
+    trend = 1  # 1: up, -1: down
+    af = af_init
+    ep = highs[0]  # extreme point
+
+    for i in range(1, n):
+        prev_psar = psar_vals[-1]
+        if trend == 1:
+            new_psar = prev_psar + af * (ep - prev_psar)
+            new_psar = min(new_psar, lows[i - 1], lows[max(i - 2, 0)])
+            if lows[i] < new_psar:
+                # 転換
+                trend = -1
+                new_psar = ep
+                ep = lows[i]
+                af = af_init
+            else:
+                if highs[i] > ep:
+                    ep = highs[i]
+                    af = min(af + af_init, af_max)
+        else:
+            new_psar = prev_psar + af * (ep - prev_psar)
+            new_psar = max(new_psar, highs[i - 1], highs[max(i - 2, 0)])
+            if highs[i] > new_psar:
+                trend = 1
+                new_psar = ep
+                ep = highs[i]
+                af = af_init
+            else:
+                if lows[i] < ep:
+                    ep = lows[i]
+                    af = min(af + af_init, af_max)
+        psar_vals.append(new_psar)
+
+    last_close = (highs[-1] + lows[-1]) / 2  # close 代わり
+    last_psar = psar_vals[-1]
+    return {
+        "psar": last_psar,
+        "trend": "上昇トレンド" if trend == 1 else "下降トレンド",
+        "signal": (
+            "上昇継続(SAR < 価格)" if trend == 1 and last_psar < last_close
+            else "下降継続(SAR > 価格)" if trend == -1 and last_psar > last_close
+            else "転換注意"
+        ),
+    }
+
+
 def all_advanced(history: list[dict]) -> dict:
-    """7 指標を一括計算。"""
+    """10 指標を一括計算(v5 で Ichimoku/Williams%R/PSAR 追加)。"""
     closes = [h["close"] for h in history if h.get("close") is not None]
     highs = [h["high"] for h in history if h.get("high") is not None]
     lows = [h["low"] for h in history if h.get("low") is not None]
@@ -264,6 +377,9 @@ def all_advanced(history: list[dict]) -> dict:
         "obv": obv_signal(closes, volumes),
         "donchian": donchian_channel(highs, lows, closes),
         "cci": cci(highs, lows, closes),
+        "williams_r": williams_r(highs, lows, closes),
+        "ichimoku": ichimoku(highs, lows, closes),
+        "psar": psar(highs, lows),
     }
 
 
@@ -365,6 +481,42 @@ def predict_technical_advanced(history: list[dict], days_ahead: int = 21) -> dic
         elif ci["CCI"] < -100:
             score += 0.15
             votes.append(("CCI 過売", 0.15))
+
+    # v5: Williams %R
+    wr = indicators.get("williams_r")
+    if wr:
+        if wr["value"] > -20:
+            score -= 0.2
+            votes.append(("Williams%R 過熱", -0.2))
+        elif wr["value"] < -80:
+            score += 0.2
+            votes.append(("Williams%R 過売", 0.2))
+
+    # v5: 一目均衡表
+    ich = indicators.get("ichimoku")
+    if ich:
+        if "雲の上" in ich["cloud_position"]:
+            score += 0.3
+            votes.append(("一目: 雲の上", 0.3))
+        elif "雲の下" in ich["cloud_position"]:
+            score -= 0.3
+            votes.append(("一目: 雲の下", -0.3))
+        if "買い" in ich["tk_cross"]:
+            score += 0.1
+            votes.append(("一目: 転換>基準", 0.1))
+        else:
+            score -= 0.1
+            votes.append(("一目: 転換<基準", -0.1))
+
+    # v5: Parabolic SAR
+    pa = indicators.get("psar")
+    if pa:
+        if "上昇" in pa["trend"]:
+            score += 0.2
+            votes.append(("PSAR 上昇", 0.2))
+        else:
+            score -= 0.2
+            votes.append(("PSAR 下降", -0.2))
 
     # スコアを月 ±5% に変換(クリップ)
     score = max(-2.0, min(2.0, score))
