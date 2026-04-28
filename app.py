@@ -44,6 +44,7 @@ from policy_events import (  # noqa: E402
     upcoming_recurring_events,
 )
 from predict import WALK_FORWARD_WEIGHTS, predict_all  # noqa: E402
+from predict_direction import predict_direction_lgbm  # noqa: E402
 from walk_forward import (  # noqa: E402
     CORE_MACROS,
     latest_walk_forward,
@@ -934,6 +935,60 @@ with tab_predict:
             "アンサンブルの値は「複数のシンプルな仮定が交差する付近」程度の意味しかありません。"
             "判断材料の 1 つとして扱ってください。"
         )
+
+        # ───────── 方向(プラス/マイナス)予測 ─────────
+        st.divider()
+        st.markdown("### 📍 方向(プラス/マイナス)予測 — LightGBM 分類器")
+        st.caption(
+            "**値ではなく「上がるか下がるか」だけ**を予測する 2 値分類モデル。"
+            "Patel 2015 / Krauss 2017 ベース。価格当てより方向当てが現実的という発想。"
+        )
+        with st.spinner("LightGBM 分類器を学習中..."):
+            try:
+                dir_pred = predict_direction_lgbm(history_for_pred, None, days_ahead=21)
+            except Exception as e:
+                st.error(f"方向予測の実行に失敗: {e}")
+                dir_pred = None
+
+        if dir_pred and "error" not in dir_pred:
+            d_col1, d_col2, d_col3, d_col4 = st.columns(4)
+            d_col1.metric(
+                "方向",
+                "🟢 プラス" if dir_pred["direction"] == "up" else "🔴 マイナス",
+            )
+            d_col2.metric(
+                "上昇確率",
+                f"{dir_pred['probability_up'] * 100:.1f}%",
+            )
+            d_col3.metric(
+                "確信度",
+                f"{dir_pred['confidence'] * 100:.0f}%",
+                help="0%=コイン投げ、100%=完全確信。20% 以上を高確度と扱う。",
+            )
+            d_col4.metric(
+                "シグナル",
+                dir_pred["signal"],
+            )
+
+            st.caption(
+                f"学習サンプル数 {dir_pred['n_train_samples']} / 訓練精度 {dir_pred['train_accuracy'] * 100:.1f}%"
+                "(in-sample なので参考値。実 walk-forward 精度は v6 レポート参照)"
+            )
+
+            if dir_pred["confidence"] < 0.10:
+                st.warning(
+                    "⚠️ 確信度が低い(コイン投げに近い)状態です。"
+                    "判断を保留するか、他の指標と合わせて検討してください。"
+                )
+            elif dir_pred["confidence"] >= 0.20:
+                st.success(
+                    "✅ 高確度ゾーン(prob ≤ 0.4 or ≥ 0.6)。"
+                    "論文ベースの期待値では、このゾーンの精度は 60-65% が目安。"
+                )
+        elif dir_pred and "error" in dir_pred:
+            st.error(f"方向予測エラー: {dir_pred['error']}")
+        else:
+            st.info("方向予測の実行に必要なデータが揃いませんでした(履歴 350 日以上が必要)。")
     else:
         st.warning("予測の実行に必要なデータが揃いませんでした(履歴が短い可能性)。")
 
