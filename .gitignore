@@ -12,8 +12,9 @@ knowledge/*
 # 生成物(個別レポート)
 outputs/*
 !outputs/.gitkeep
-# ただし PDCA 集計レポートは公開する(機密情報を含まない、実装精度の説明として有用)
+# ただし PDCA 集計レポート + サマリ表は公開する(機密情報を含まない、実装精度の説明として有用)
 !outputs/pdca_*.md
+!outputs/v3_summary_table.md
 
 # --- Claude Code ローカル個人設定 ---
 .claude/settings.local.json

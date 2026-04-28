@@ -68,7 +68,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-CACHE_TTL = 3600  # 1 時間
+CACHE_TTL = 60  # 60 秒(yfinance の遅延 15 分はソース側、ここはアプリの再フェッチ間隔)
 
 
 # ───────── キャッシュ付き取得関数 ─────────
@@ -140,6 +140,9 @@ period = st.sidebar.selectbox(
 )
 
 run = st.sidebar.button("🔍 分析開始", type="primary", use_container_width=True)
+if st.sidebar.button("🔄 キャッシュクリア(最新を取得)", use_container_width=True):
+    st.cache_data.clear()
+    st.success("キャッシュをクリアしました。次の分析で最新データを取得します。")
 
 # クイック入力ボタン
 st.sidebar.markdown("##### よく見る銘柄")
@@ -719,6 +722,34 @@ with tab_predict:
                 "現在値からの変化(%)": st.column_config.NumberColumn(format="%.2f"),
             },
         )
+
+        # LightGBM ML の特徴量重要度
+        ml_model = prediction["models"].get("lightgbm_ml")
+        if ml_model and ml_model.get("top_features"):
+            with st.expander("🤖 LightGBM 特徴量重要度(上位 10)"):
+                feats = ml_model["top_features"]
+                df_feats = pd.DataFrame(
+                    [{"特徴量": k, "重要度": v} for k, v in feats.items()]
+                )
+                fig_imp = go.Figure(
+                    go.Bar(
+                        x=df_feats["重要度"],
+                        y=df_feats["特徴量"],
+                        orientation="h",
+                        marker_color="#7e57c2",
+                    )
+                )
+                fig_imp.update_layout(
+                    height=320,
+                    margin=dict(l=10, r=30, t=10, b=10),
+                    yaxis=dict(autorange="reversed"),
+                    template="plotly_white",
+                )
+                st.plotly_chart(fig_imp, use_container_width=True)
+                st.caption(
+                    "特徴量名の意味: log_ret_*d=過去N日対数リターン / vol_*d=N日ボラ / "
+                    "ma*_ratio=現在値とMAの差 / rsi14=RSI / macro_*=マクロ指標の20日リターン"
+                )
 
         # マクロ連動の内訳表示
         macro_model = prediction["models"].get("macro_linked")

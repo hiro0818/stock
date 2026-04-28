@@ -38,6 +38,7 @@ from predict import (  # noqa: E402
     predict_monte_carlo,
     predict_technical,
 )
+from predict_ml import predict_crypto_linked, predict_lightgbm  # noqa: E402
 
 
 # 検証時に使うコアマクロ指標(全候補だと API 呼び出しが多すぎるため、主要 12 個に絞る)
@@ -115,8 +116,8 @@ def run_walk_forward(
         preds["monte_carlo"] = mc["median"] if mc else None
 
         # マクロ連動予測(同時点までのマクロ履歴で計算)
+        past_macro = {}
         if use_macro and macro_histories:
-            past_macro = {}
             for m_t, m_hist in macro_histories.items():
                 # その時点の日付以下にトリミング
                 cutoff = past_history[-1]["date"]
@@ -127,6 +128,27 @@ def run_walk_forward(
             preds["macro_linked"] = macro_pred["predicted"] if macro_pred else None
         else:
             preds["macro_linked"] = None
+
+        # LightGBM ML 予測(マクロ込みの特徴量で学習・予測)
+        if use_macro and past_macro:
+            try:
+                ml_pred = predict_lightgbm(past_history, past_macro, forecast_days)
+                preds["lightgbm_ml"] = ml_pred["predicted"] if ml_pred and "predicted" in ml_pred else None
+            except Exception:
+                preds["lightgbm_ml"] = None
+        else:
+            preds["lightgbm_ml"] = None
+
+        # 暗号連動(BTC ベータ)
+        btc_past = past_macro.get("BTC-USD") if past_macro else None
+        if btc_past:
+            try:
+                cp = predict_crypto_linked(past_history, btc_past, forecast_days)
+                preds["crypto_linked"] = cp["predicted"] if cp else None
+            except Exception:
+                preds["crypto_linked"] = None
+        else:
+            preds["crypto_linked"] = None
 
         # アンサンブル
         valid = [p for p in preds.values() if p is not None]

@@ -30,21 +30,25 @@ from correlation import find_top_correlations  # noqa: E402
 #
 # 5 モデル(マクロ連動を含む):
 WALK_FORWARD_WEIGHTS: dict[str, float] = {
-    "technical": 0.257,       # 平均誤差 10.18%(最小)→ 最大重み
-    "macro_linked": 0.220,    # 平均誤差 11.14%(マクロ連動、原油/金/BTC など)
-    "mean_reversion": 0.217,  # 平均誤差 11.11%
-    "monte_carlo": 0.190,     # 平均誤差 11.92%(方向当たり率は高い)
-    "linear": 0.116,          # 平均誤差 15.51%(最大、トレンド時に過大予測)→ 最小重み
-    # アナリスト目標は時点固定で walk-forward と整合しないため重みなし(参考値)
+    # v3: 10 銘柄 × 7 モデル × 20 サイクル PDCA で自動収束した重み(2026-04-28、outputs/pdca_loop_20260428-1502.json)
+    # 結果: 誤差 10.32%(v2: 10.47%)、方向当たり率 54.6%(v2: 53.2%)
+    "crypto_linked": 0.171,   # 全銘柄での誤差最小 10.16%(暗号以外でも穏当な予測になる)
+    "technical": 0.170,       # 既存最良、誤差 10.18%
+    "lightgbm_ml": 0.152,     # ML、方向当たり率 56.2%(全モデル最良)
+    "macro_linked": 0.151,    # マクロ連動 11.08%
+    "mean_reversion": 0.144,  # 平均回帰 11.11%
+    "monte_carlo": 0.126,     # MC 11.92%
+    "linear": 0.085,          # 誤差 14.65% で最大、最小重み
 }
 
 
 # ───────── 個別モデル ─────────
 
 
-def predict_linear(history: list[dict], days_ahead: int = 30) -> float | None:
-    """直近 30 営業日の線形回帰でトレンド外挿。"""
-    closes = [h["close"] for h in history[-30:] if h.get("close") is not None]
+def predict_linear(history: list[dict], days_ahead: int = 30, window: int = 45) -> float | None:
+    """線形回帰でトレンド外挿。
+    PDCA cycle 2: 窓を 30 → 45 日に拡張(短期過剰反応を抑制)。"""
+    closes = [h["close"] for h in history[-window:] if h.get("close") is not None]
     if len(closes) < 10:
         return None
     n = len(closes)
@@ -127,7 +131,8 @@ def predict_technical(history: list[dict], technical: dict, days_ahead: int = 30
     return current * (1 + pct)
 
 
-def predict_monte_carlo(history: list[dict], days_ahead: int = 30, n_paths: int = 500) -> dict | None:
+def predict_monte_carlo(history: list[dict], days_ahead: int = 30, n_paths: int = 1000) -> dict | None:
+    # PDCA cycle 3: N=200 → 1000 でモンテカルロのノイズ削減
     """ヒストリカルボラティリティで価格分布を生成し、中央値・25/75 パーセンタイルを返す。
     µ = 過去 90 日の対数リターン平均、σ = 過去 90 日の対数リターン標準偏差。
     """
@@ -188,9 +193,9 @@ def predict_macro_linked(
 
     current = closes[-1]
 
-    # 相関計算
+    # 相関計算(PDCA cycle 4: 閾値 0.3 → 0.35 で雑音相関を除外)
     correlations = find_top_correlations(
-        history, macro_histories, window=90, min_abs_corr=0.3, top_n=5
+        history, macro_histories, window=90, min_abs_corr=0.35, top_n=5
     )
     if not correlations:
         return None
@@ -318,16 +323,68 @@ def predict_all(
             out["models"]["macro_linked"] = {
                 "label": "マクロ連動",
                 "predicted": None,
-                "method": "高相関(|r|≥0.3)のマクロ指標が見つからず実行不可",
+                "method": "高相関(|r|≥0.35)のマクロ指標が見つからず実行不可",
             }
 
-    # アンサンブル(中央値): 外れ値耐性
+        # LightGBM ML 予測(PDCA cycle 7、データが十分な場合のみ)
+        try:
+            from predict_ml import predict_crypto_linked, predict_lightgbm
+            ml_pred = predict_lightgbm(history, macro_histories, days_ahead)
+            if ml_pred and "predicted" in ml_pred:
+                out["models"]["lightgbm_ml"] = {
+                    "label": "LightGBM ML(15特徴量+マクロ)",
+                    "predicted": ml_pred["predicted"],
+                    "method": (
+                        "勾配ブースティング回帰。特徴量: 過去リターン(1d/5d/20d/60d/252d) + "
+                        "ボラ + RSI + MA比 + MACD + 出来高比 + レンジ位置 + マクロログリターン。"
+                        f"学習サンプル数 {ml_pred.get('n_train_samples')}"
+                    ),
+                    "top_features": ml_pred.get("top_features", {}),
+                }
+            # 暗号銘柄向け専用モデル(BTC が macro_histories に含まれる場合)
+            btc_hist = macro_histories.get("BTC-USD")
+            if btc_hist:
+                crypto_pred = predict_crypto_linked(history, btc_hist, days_ahead)
+                if crypto_pred:
+                    out["models"]["crypto_linked"] = {
+                        "label": "暗号連動(BTC ベータ)",
+                        "predicted": crypto_pred["predicted"],
+                        "method": (
+                            f"銘柄 vs BTC のベータ ({crypto_pred['beta']:.2f}) × BTC 線形外挿。"
+                            "暗号関連銘柄(COIN/MSTR)向けの専用モデル"
+                        ),
+                    }
+        except Exception:
+            pass
+
+    # 予測値の極端値クリッピング(PDCA cycle 11: 月 ±20% を超える予測を抑制)
+    if current:
+        for m_name, m_data in out["models"].items():
+            p = m_data.get("predicted")
+            if p is not None and current > 0:
+                change = (p - current) / current
+                if change > 0.20:
+                    m_data["predicted"] = current * 1.20
+                    m_data["clipped"] = "上限+20%"
+                elif change < -0.20:
+                    m_data["predicted"] = current * 0.80
+                    m_data["clipped"] = "下限-20%"
+
+    # アンサンブル(PDCA cycle 5: median → trimmed mean(両端 20%トリム)で外れ値除外しつつ中心化)
     valid_preds = [m["predicted"] for m in out["models"].values() if m["predicted"] is not None]
     if valid_preds:
-        out["ensemble"] = statistics.median(valid_preds)
+        sorted_preds = sorted(valid_preds)
+        n = len(sorted_preds)
+        if n >= 5:
+            # 両端 20% を除外
+            trim = max(1, int(n * 0.2))
+            trimmed = sorted_preds[trim:-trim] if n - 2 * trim > 0 else sorted_preds
+            out["ensemble"] = sum(trimmed) / len(trimmed)
+        else:
+            out["ensemble"] = statistics.median(sorted_preds)
         out["ensemble_band"] = {
-            "low": min(valid_preds),
-            "high": max(valid_preds),
+            "low": sorted_preds[0],
+            "high": sorted_preds[-1],
         }
 
     # 重み付きアンサンブル(walk-forward 精度ベースの Act 反映版)

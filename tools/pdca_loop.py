@@ -31,7 +31,15 @@ DEFAULT_TICKERS = [
     "AAPL", "NVDA", "MSFT", "7203_T", "6758_T",
     "XOM", "CVX", "NEM", "COIN", "MSTR",
 ]
-MODELS = ["linear", "mean_reversion", "technical", "monte_carlo", "macro_linked"]
+MODELS = [
+    "linear",
+    "mean_reversion",
+    "technical",
+    "monte_carlo",
+    "macro_linked",
+    "lightgbm_ml",      # PDCA cycle 7 で追加
+    "crypto_linked",    # PDCA cycle 6 で追加(暗号銘柄向け、他では効果薄い)
+]
 
 
 def load_all_samples(tickers: list[str]) -> dict[str, list[dict]]:

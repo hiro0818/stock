@@ -15,7 +15,7 @@
 ### 2. Python と必要パッケージ
 
 ```powershell
-pip install yfinance streamlit plotly pandas pytrends
+pip install yfinance streamlit plotly pandas pytrends lightgbm scikit-learn
 ```
 
 | パッケージ | 用途 |
@@ -23,6 +23,7 @@ pip install yfinance streamlit plotly pandas pytrends
 | yfinance | 株価・財務データの取得 |
 | streamlit + plotly + pandas | Web ダッシュボード |
 | pytrends | Google Trends(検索ボリューム) |
+| lightgbm + scikit-learn | LightGBM 機械学習予測モデル(v3 から) |
 
 ### 3. (任意)PDF 出力したいなら
 
