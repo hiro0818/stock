@@ -242,11 +242,11 @@ python tools/daily_check.py
 6. 「プログラム/スクリプト」に `powershell.exe`
 7. 「引数の追加」に:
    ```
-   -NoProfile -ExecutionPolicy Bypass -File "C:\Users\hiroy\OneDrive\デスクトップ\stock-screening\tools\daily_check.ps1"
+   -NoProfile -ExecutionPolicy Bypass -File "<このリポジトリの絶対パス>\tools\daily_check.ps1"
    ```
 8. 「開始(オプション)」に:
    ```
-   C:\Users\hiroy\OneDrive\デスクトップ\stock-screening
+   <このリポジトリの絶対パス>
    ```
 9. 「完了」で保存
 
